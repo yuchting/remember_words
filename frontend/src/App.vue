@@ -16,6 +16,15 @@ type SheetResult = { sheets: Sheet[]; skipped: { name: string; reason: string }[
 type ManagedWord = ImportWord & { id: number; stage: number; due_at: number | null; attempts: number; correct: number; last_answer_at: number | null }
 type DeckDetail = { id: number; name: string; words: ManagedWord[] }
 type History = { stage: number; due_at: number | null; intervals: number[]; attempts: { correct: boolean; created_at: number; answer: string; round_number: number }[] }
+type SpeechProvider = 'azure' | 'google' | 'off'
+type SpeechSettings = { primary: SpeechProvider; fallback: SpeechProvider; browser_fallback: boolean; azure: { region: string; voice: string; key_set: boolean }; google: { voice: string; key_set: boolean } }
+type SpeechCache = { files: number; bytes: number; max_bytes: number }
+const speechCache = ref<SpeechCache | null>(null)
+const cacheSize = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(2)} MiB`
+const speechSettings = ref<SpeechSettings | null>(null)
+const speechPublic = ref({ enabled: false, browser_fallback: false })
+const speechKeys = ref({ azure: '', google: '' })
+const speechClear = ref({ azure: false, google: false })
 const user = ref<User | null>(null)
 const ready = ref(false)
 const busy = ref(false)
@@ -130,7 +139,7 @@ const editingExample = ref(false)
 const exampleDraft = ref('')
 const translationDraft = ref('')
 const answerInput = ref<HTMLInputElement | null>(null)
-const keyboard = ref(true)
+const keyboard = ref(false)
 const isParent = computed(() => user.value?.role === 'parent' || user.value?.role === 'admin')
 const totalWords = computed(() => decks.value.reduce((sum, deck) => sum + deck.total, 0))
 const rows = ['qwertyuiop', 'asdfghjkl', 'zxcvbnm']
@@ -271,7 +280,11 @@ async function run(action: () => Promise<void>) {
   if (busy.value) return
   busy.value = true; error.value = ''; notice.value = ''
   try { await action() } catch (cause) { error.value = cause instanceof Error ? cause.message : '操作失败，请重试' }
-  finally { busy.value = false }
+  finally {
+    busy.value = false
+    await nextTick()
+    if (session.value && item.value && !answered.value && !content.value && !report.value && !summary.value) answerInput.value?.focus()
+  }
 }
 async function refresh() {
   const [list, review, active] = await Promise.all([api<Deck[]>('/decks'), api<{ count: number }>('/reviews/due'), api<{ session: Progress | null }>('/study/active')])
@@ -288,6 +301,68 @@ async function login() {
 async function logout() {
   await run(async () => { await api('/auth/logout', 'POST'); user.value = null; csrf = ''; session.value = null; page.value = 'decks'; content.value = null; summary.value = null; detail.value = null; wordDraft.value = null; history.value = null; clearSheets(); importText.value = ''; driveUrl.value = ''; targetUser.value = '' })
 }
+async function openSpeech() {
+  await run(async () => {
+    speechSettings.value = await api<SpeechSettings>('/admin/speech')
+    speechKeys.value = { azure: '', google: '' }; speechClear.value = { azure: false, google: false }
+    speechCache.value = await api<SpeechCache>('/admin/speech/cache')
+    page.value = 'speech'
+  })
+}
+async function refreshSpeechCache() {
+  await run(async () => { speechCache.value = await api<SpeechCache>('/admin/speech/cache') })
+}
+async function clearSpeechCache() {
+  if (!confirm('确定清空全部云端语音缓存？学习记录和设置不变；下次朗读将重新调用云端服务，可能产生费用。')) return
+  await run(async () => {
+    speechCache.value = await api<SpeechCache>('/admin/speech/cache', 'DELETE')
+    notice.value = '云端语音缓存已清空'
+  })
+}
+async function saveSpeech() {
+  if (!speechSettings.value) return
+  await run(async () => {
+    const settings = speechSettings.value!
+    await api('/admin/speech', 'PUT', {
+      primary: settings.primary, fallback: settings.fallback, browser_fallback: settings.browser_fallback,
+      azure: { region: settings.azure.region, voice: settings.azure.voice, key: speechKeys.value.azure, clear_key: speechClear.value.azure },
+      google: { voice: settings.google.voice, key: speechKeys.value.google, clear_key: speechClear.value.google },
+    })
+    speechKeys.value = { azure: '', google: '' }; speechClear.value = { azure: false, google: false }
+    speechSettings.value = await api<SpeechSettings>('/admin/speech')
+    speechPublic.value = await api<{ enabled: boolean; browser_fallback: boolean }>('/speech/settings')
+    notice.value = '朗读设置已保存；试听使用已保存配置。'
+  })
+}
+async function testSpeechProvider(provider: 'azure' | 'google') {
+  if (!speechSettings.value) return
+  clearAudio()
+  notice.value = ''
+  const version = audioVersion
+  const settings = speechSettings.value[provider]
+  await run(async () => {
+    const blob = await api<Blob>('/admin/speech/test-provider', 'POST', {
+      provider,
+      config: { voice: settings.voice, ...('region' in settings ? { region: settings.region } : {}), key: speechKeys.value[provider], clear_key: speechClear.value[provider] },
+    }, 'download')
+    if (version !== audioVersion) return
+    playAudio(URL.createObjectURL(blob), () => { notice.value = ''; error.value = '测试音频播放失败，请检查浏览器播放权限' }, true, () => {
+      notice.value = `${provider === 'azure' ? 'Azure' : 'Google'} 测试音频已开始播放，请确认是否听到声音。当前输入未保存。`
+    })
+  })
+}
+async function testSpeech() {
+  clearAudio()
+  const version = audioVersion
+  await run(async () => {
+    const blob = await api<Blob>('/admin/speech/test', 'POST', {}, 'download')
+    if (version === audioVersion) playAudio(URL.createObjectURL(blob), () => { error.value = '云端试听播放失败，请检查浏览器播放权限' }, true)
+  })
+}
+watch(user, () => {
+  clearAudio(); speechSettings.value = null
+  speechKeys.value = { azure: '', google: '' }; speechClear.value = { azure: false, google: false }
+}, { flush: 'sync' })
 async function createChild() {
   await run(async () => {
     await api('/admin/users', 'POST', { username: childName.value, password: childPassword.value })
@@ -428,7 +503,7 @@ async function loadNext() {
   item.value = data.item ?? null; summary.value = data.complete ? (data.summary ?? { attempts: 0, correct: 0 }) : null
   content.value = null; answer.value = ''; answered.value = false; editingExample.value = false
   if (data.complete) await refresh()
-  await nextTick(); resetFluency(); answerInput.value?.focus()
+  await nextTick(); resetFluency()
 }
 async function showPreviousReport() {
   if (!activeStudy.value || activeStudy.value.round_number < 2) return
@@ -457,7 +532,7 @@ async function reveal() {
   fluent = false
   await run(async () => {
     content.value = await api<Content>(`/study/${session.value}/items/${item.value?.id}/reveal`, 'POST')
-    speak(content.value.word, content.value.audio)
+    void speak(content.value.word, content.value.audio, content.value.word_id)
   })
 }
 async function submit(skip = false) {
@@ -469,7 +544,7 @@ async function submit(skip = false) {
     if (result.round_finished) pendingReport.value = result.round_number!
     answered.value = true
     startCooldown(result.correct && !result.practice ? (fast ? 1 : 2) : result.practice && result.spelling_correct ? 2 : 3)
-    speak(result.word, result.audio)
+    void speak(result.word, result.audio, result.word_id)
   })
   await nextTick(); continueButton.value?.focus()
 }
@@ -507,31 +582,78 @@ function key(value: string) {
 }
 let activeAudio: HTMLAudioElement | null = null
 let audioTimer: ReturnType<typeof setTimeout> | undefined
+let audioUrl: string | null = null
+let audioVersion = 0
 function clearAudio() {
+  audioVersion++
   clearTimeout(audioTimer); audioTimer = undefined
   if (activeAudio) {
-    activeAudio.onplaying = null; activeAudio.onerror = null
+    activeAudio.onplaying = null; activeAudio.onerror = null; activeAudio.onended = null
     activeAudio.pause(); activeAudio.removeAttribute('src'); activeAudio.load(); activeAudio = null
   }
+  if (audioUrl) { URL.revokeObjectURL(audioUrl); audioUrl = null }
   if ('speechSynthesis' in window) speechSynthesis.cancel()
 }
-function speak(text: string, audio?: string) {
-  clearAudio()
-  if (audio && /^(https?:\/\/|\/)/i.test(audio) && !audio.startsWith('//')) {
-    const player = new Audio(audio)
-    activeAudio = player
-    const fallback = () => { if (activeAudio === player) speak(text) }
-    player.onplaying = () => { clearTimeout(audioTimer); audioTimer = undefined }
-    player.onerror = fallback
-    audioTimer = setTimeout(fallback, 8000)
-    player.play().catch(fallback); return
+function playAudio(url: string, fallback: () => void, owned = false, playing?: () => void) {
+  const player = new Audio(url)
+  activeAudio = player
+  if (owned) audioUrl = url
+  const failed = () => {
+    if (activeAudio !== player) return
+    clearAudio(); fallback()
   }
+  player.onplaying = () => { clearTimeout(audioTimer); audioTimer = undefined; playing?.() }
+  player.onerror = failed
+  player.onended = () => { if (activeAudio === player) clearAudio() }
+  audioTimer = setTimeout(failed, 8000)
+  player.play().catch(failed)
+}
+function browserSpeak(text: string) {
   if (!('speechSynthesis' in window)) { error.value = '浏览器不支持语音播放'; return }
   speechSynthesis.cancel()
+  const voices = speechSynthesis.getVoices?.() ?? []
+  const voice = voices.find(candidate => /^en(?:-|_)/i.test(candidate.lang))
+  if (voices.length && !voice) { error.value = '设备没有可用英语语音，请安装英语语音包或配置云端朗读'; return }
   const utterance = new SpeechSynthesisUtterance(text); utterance.lang = 'en-US'; utterance.rate = 0.85
-  utterance.onerror = () => { error.value = '语音播放失败，请检查浏览器语音设置' }
+  if (voice) utterance.voice = voice
+  utterance.onerror = () => { error.value = '语音播放失败，请检查浏览器英语语音设置' }
   speechSynthesis.speak(utterance)
 }
+function legacySpeak(text: string, audio?: string) {
+  if (audio && /^(https?:\/\/|\/)/i.test(audio) && !audio.startsWith('//')) playAudio(audio, () => browserSpeak(text))
+  else browserSpeak(text)
+}
+async function speak(text: string, audio?: string, wordId?: number, kind: 'word' | 'example' = 'word') {
+  clearAudio()
+  const version = audioVersion
+  if (wordId) {
+    try {
+      const settings = await api<{ enabled: boolean; browser_fallback: boolean }>('/speech/settings')
+      if (version !== audioVersion) return
+      speechPublic.value = settings
+    } catch (cause) {
+      if (version === audioVersion) error.value = cause instanceof Error ? cause.message : '无法读取朗读设置'
+      return
+    }
+    if (version !== audioVersion) return
+  }
+  if (!speechPublic.value.enabled) { legacySpeak(text, audio); return }
+  const failed = (cause: unknown) => {
+    if (speechPublic.value.browser_fallback) browserSpeak(text)
+    else error.value = cause instanceof Error ? cause.message : '云端朗读失败；未启用设备语音回退'
+  }
+  if (!wordId) { failed(new Error('缺少词条编号，无法请求云端朗读')); return }
+  try {
+    const blob = await api<Blob>('/speech', 'POST', { word_id: wordId, kind }, 'download')
+    if (version !== audioVersion) return
+    playAudio(URL.createObjectURL(blob), () => failed(new Error('云端音频播放失败，请检查浏览器播放权限')), true)
+  } catch (cause) {
+    if (version !== audioVersion) return
+    if (cause instanceof Error && cause.message === '云端朗读未启用') { legacySpeak(text, audio); return }
+    failed(cause)
+  }
+}
+watch(page, clearAudio, { flush: 'sync' })
 async function leaveStudy() {
   clearCooldown()
   clearAudio()
@@ -571,13 +693,13 @@ onMounted(async () => {
         <div class="study-actions"><button :disabled="busy || pendingReport !== null" @click="roundAction('interrupt')">中断本轮，不计成绩</button><button :disabled="busy || pendingReport !== null" @click="roundAction('finish')">提前完结，结算已答</button></div>
         <p class="eyebrow">看中文 · 回忆英文</p><h1 class="meaning">{{ item.meaning }}</h1>
         <form @submit.prevent="submit()"><label class="sr-only" for="answer">输入英文单词</label><input id="answer" ref="answerInput" v-model="answer" @beforeinput="beforeInput" @input="nativeInput" @paste="fluent = false" @cut="fluent = false" @drop="fluent = false" class="answer-input" lang="en" autocomplete="off" autocapitalize="none" :spellcheck="false" :disabled="busy || answered" placeholder="在这里输入英文" /><div class="study-actions"><button type="button" class="secondary" :disabled="busy || answered || !!content" @click="reveal">揭示答案</button><button type="button" class="secondary" :disabled="busy || answered" @click="submit(true)">不会，记一下</button><button class="primary" :disabled="busy || answered || !answer.trim()">提交答案</button></div></form>
-        <div v-if="content" class="answer-card" aria-live="polite"><p v-if="answered" :class="['answer-status', content.correct ? 'correct' : 'incorrect']">{{ content.practice && content.spelling_correct ? '巩固拼写正确；首次成绩不变。' : content.correct ? '回答正确，记得不错！' : '还没记牢，继续后重输同一个词。' }}</p><div class="word-line"><h2>{{ content.word }}</h2><span class="muted">{{ content.phonetic }}</span><button class="audio-button" aria-label="播放单词发音" @click="speak(content.word, content.audio)">朗读单词</button></div><p>{{ content.meaning }}</p><ul v-if="content.definitions?.length" lang="en"><li v-for="definition in content.definitions.slice(0, 5)" :key="definition">{{ definition }}</li></ul><template v-if="content.example"><div class="example-line"><p lang="en">{{ content.example }}</p><button class="text-button" @click="speak(content.example!)">朗读例句</button></div><p class="muted">{{ content.example_translation }}</p></template><p v-else class="muted">暂无例句，可查词补全或手工添加。</p><div v-if="content.word_id" class="content-tools"><button class="secondary" :disabled="busy || editingExample" @click="enrich">查词补全</button><button class="text-button" :disabled="busy" @click="editExample">编辑例句与译文</button></div><form v-if="editingExample" class="example-editor" @submit.prevent="saveExample"><label>完整英文例句<textarea v-model="exampleDraft" lang="en" required maxlength="2000" rows="3" placeholder="填写完整英文句子"></textarea></label><label>完整中文译文<textarea v-model="translationDraft" required maxlength="2000" rows="3" placeholder="填写对应中文译文"></textarea></label><div class="content-tools"><button class="primary" :disabled="busy">保存例句与译文</button><button type="button" class="text-button" :disabled="busy" @click="editingExample = false">取消</button></div></form><p v-if="!answered" class="fine">看过答案也没关系，输入一遍加深印象，或选择“不会”。</p><button v-if="answered" ref="continueButton" class="primary wide" :disabled="busy || cooldownSeconds > 0" @click="continueStudy">{{ busy ? '正在加载…' : cooldownSeconds > 0 ? `继续（${cooldownSeconds}秒）` : '继续 →' }}</button></div>
+        <div v-if="content" class="answer-card" aria-live="polite"><p v-if="answered" :class="['answer-status', content.correct ? 'correct' : 'incorrect']">{{ content.practice && content.spelling_correct ? '巩固拼写正确；首次成绩不变。' : content.correct ? '回答正确，记得不错！' : '还没记牢，继续后重输同一个词。' }}</p><div class="word-line"><h2>{{ content.word }}</h2><span class="muted">{{ content.phonetic }}</span><button class="audio-button" aria-label="播放单词发音" @click="speak(content.word, content.audio, content.word_id)">朗读单词</button></div><p>{{ content.meaning }}</p><ul v-if="content.definitions?.length" lang="en"><li v-for="definition in content.definitions.slice(0, 5)" :key="definition">{{ definition }}</li></ul><template v-if="content.example"><div class="example-line"><p lang="en">{{ content.example }}</p><button class="text-button" @click="speak(content.example!, undefined, content.word_id, 'example')">朗读例句</button></div><p class="muted">{{ content.example_translation }}</p></template><p v-else class="muted">暂无例句，可查词补全或手工添加。</p><div v-if="content.word_id" class="content-tools"><button class="secondary" :disabled="busy || editingExample" @click="enrich">查词补全</button><button class="text-button" :disabled="busy" @click="editExample">编辑例句与译文</button></div><form v-if="editingExample" class="example-editor" @submit.prevent="saveExample"><label>完整英文例句<textarea v-model="exampleDraft" lang="en" required maxlength="2000" rows="3" placeholder="填写完整英文句子"></textarea></label><label>完整中文译文<textarea v-model="translationDraft" required maxlength="2000" rows="3" placeholder="填写对应中文译文"></textarea></label><div class="content-tools"><button class="primary" :disabled="busy">保存例句与译文</button><button type="button" class="text-button" :disabled="busy" @click="editingExample = false">取消</button></div></form><p v-if="!answered" class="fine">看过答案也没关系，输入一遍加深印象，或选择“不会”。</p><button v-if="answered" ref="continueButton" class="primary wide" :disabled="busy || cooldownSeconds > 0" @click="continueStudy">{{ busy ? '正在加载…' : cooldownSeconds > 0 ? `继续（${cooldownSeconds}秒）` : '继续 →' }}</button></div>
         <div v-if="!answered" class="keyboard-wrap"><button class="text-button keyboard-toggle" :aria-expanded="keyboard" @click="keyboard = !keyboard">{{ keyboard ? '收起软键盘' : '展开软键盘' }}</button><div v-if="keyboard" class="keyboard" aria-label="英文软键盘"><div v-for="row in rows" :key="row" class="keyboard-row"><button v-for="letter in row" :key="letter" :disabled="busy" @mousedown.prevent @click="key(letter)">{{ letter }}</button></div><div class="keyboard-row"><button :disabled="busy" @mousedown.prevent @click="key('-')">-</button><button :disabled="busy" @mousedown.prevent @click="key('\'')">'</button><button class="space-key" :disabled="busy" @mousedown.prevent @click="key(' ')">空格</button><button class="delete-key" aria-label="删除一个字符" :disabled="busy" @mousedown.prevent @click="key('Backspace')">⌫</button></div></div></div>
       </section>
       <section v-else class="panel"><p>学习内容暂未载入。</p><button class="primary" :disabled="busy" @click="run(loadNext)">重新加载</button></section>
     </main>
     <main v-else class="dashboard">
-      <nav class="tabs" aria-label="主要导航"><button :class="{ active: page === 'decks' }" @click="page = 'decks'">我的词库</button><button :class="{ active: page === 'import' }" @click="page = 'import'">导入词库</button><button :disabled="busy" :class="{ active: page === 'backup' }" @click="page = 'backup'">个人备份</button><button v-if="isParent" :class="{ active: page === 'family' }" @click="page = 'family'">家庭管理</button></nav>
+      <nav class="tabs" aria-label="主要导航"><button :class="{ active: page === 'decks' }" @click="page = 'decks'">我的词库</button><button :class="{ active: page === 'import' }" @click="page = 'import'">导入词库</button><button :disabled="busy" :class="{ active: page === 'backup' }" @click="page = 'backup'">个人备份</button><button v-if="isParent" :class="{ active: page === 'family' }" @click="page = 'family'">家庭管理</button><button v-if="isParent" :disabled="busy" :class="{ active: page === 'speech' }" @click="openSpeech">云端朗读</button></nav>
       <template v-if="page === 'decks'">
         <section v-if="activeStudy" class="panel" aria-label="已保存的学习进度"><h2>继续第 {{ activeStudy.round_number }} 轮</h2><p>本轮已完成 {{ activeStudy.answered }}/{{ activeStudy.total }} 词，剩余 {{ activeStudy.remaining }} 词。{{ activeStudy.round_number > 1 ? '本轮仅练上一轮未独立答对的词。' : '本轮覆盖本次学习的全部单词。' }}</p><p class="fine">每次提交自动保存；提示、不会和答错的词会进入下一轮，直到独立答对。</p><button :disabled="busy" @click="resumeStudy">继续学习</button><button v-if="activeStudy.round_number > 1" :disabled="busy" @click="showPreviousReport">查看上一轮报告</button></section>
         <section class="welcome"><div><p class="eyebrow">把今天的一点，变成明天的更多</p><h1>你好，{{ user.username }}。</h1><p class="muted">不必一次记住所有，只要每天向前一点。</p><p class="fine">每人同时进行一个学习批次；开始任意词库会优先恢复未完成的批次。</p></div><div class="today-date">{{ new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' }) }}</div></section>
@@ -586,6 +708,46 @@ onMounted(async () => {
         <div v-if="decks.length" class="deck-grid"><article v-for="(deck, index) in decks" :key="deck.id" class="panel deck-card"><span class="deck-icon" :class="`tone-${index % 3}`">{{ deck.name?.slice(0, 1) || '词' }}</span><h3>{{ deck.name || '未命名词库' }}</h3><p class="muted">{{ deck.total }} 个单词 <span class="dot">·</span> 已掌握 {{ deck.learned ?? 0 }} 个 <span class="dot">·</span> {{ deck.due }} 个待复习</p><button class="secondary" :disabled="busy" @click="openStatistics(deck.id)">统计信息</button><button class="secondary" :disabled="busy" @click="openDeck(deck.id)">管理词库</button><div class="deck-footer"><span class="fine">{{ deck.started_at ? '已开始学习' : '等待初次相遇' }}</span><button class="text-button" :disabled="busy || !deck.total" @click="start(deck)">{{ deck.started_at ? '继续学习' : '开始学习' }} →</button></div></article></div>
         <section v-else class="panel empty"><h3>第一本词库，从这里开始</h3><p class="muted">导入一份 JSON 单词表，开启你的记忆旅程。</p><button class="primary" @click="page = 'import'">导入词库</button></section>
       </template>
+      <section v-else-if="page === 'speech' && isParent && speechSettings" class="panel speech-panel" aria-labelledby="speech-heading">
+        <h1 id="speech-heading">云端朗读设置</h1>
+        <p>家庭共用。云端启用后，单词和例句由服务器按主服务、备用服务顺序合成；设备语音回退默认关闭。关闭主服务则使用原有词典音频／设备语音。</p>
+        <p class="fine">API key 只提交给本站后端，不会回显。配置教程见项目 README 的“云端朗读”。云端合成可能收费，并向服务商发送朗读文本。</p>
+        <form @submit.prevent="saveSpeech">
+          <fieldset :disabled="busy" class="speech-routing">
+            <legend>服务顺序</legend>
+            <label>主服务<select v-model="speechSettings.primary"><option value="off">关闭云端朗读</option><option value="azure">Azure</option><option value="google">Google</option></select></label>
+            <label>备用服务<select v-model="speechSettings.fallback"><option value="off">不使用备用</option><option value="azure">Azure</option><option value="google">Google</option></select></label>
+            <label class="speech-check"><input v-model="speechSettings.browser_fallback" type="checkbox" />云端失败后允许设备英语语音回退（默认关闭）</label>
+          </fieldset>
+          <div class="speech-providers">
+          <fieldset :disabled="busy" class="speech-provider">
+            <legend>Azure AI Speech</legend>
+            <a class="text-button" href="https://portal.azure.com/#view/Microsoft_Azure_Billing/ModernBillingMenuBlade/~/Overview" target="_blank" rel="noopener noreferrer">查看额度／账单（新窗口）</a>
+            <p class="fine">登录 Azure 后选择语音资源对应的订阅；免费层、用量和费用以官方控制台为准。</p>
+            <label>Region<input v-model="speechSettings.azure.region" placeholder="eastus（须与资源区域一致）" autocomplete="off" /></label>
+            <label>Voice<input v-model="speechSettings.azure.voice" placeholder="en-US-JennyNeural" autocomplete="off" /></label>
+            <div class="speech-key-row"><label>API Key<span class="speech-key-input"><input v-model="speechKeys.azure" type="password" autocomplete="new-password" :placeholder="speechSettings.azure.key_set ? '*****' : '请输入 API Key'" :disabled="speechClear.azure" aria-describedby="azure-key-help" /><span class="speech-key-status" role="status">{{ speechSettings.azure.key_set ? '已设置' : '未设置' }}</span></span></label><button type="button" class="secondary" :disabled="busy || speechClear.azure" @click="testSpeechProvider('azure')">测试一下</button></div>
+            <p id="azure-key-help" class="fine">{{ speechSettings.azure.key_set ? '***** 表示服务器已保存密钥；留空保留，输入新密钥则替换。' : '填写密钥后保存；也可先点击“测试一下”。' }}</p>
+            <label class="speech-check"><input v-model="speechClear.azure" type="checkbox" />保存时清除 Azure key</label>
+          </fieldset>
+          <fieldset :disabled="busy" class="speech-provider">
+            <legend>Google Cloud Text-to-Speech</legend>
+            <a class="text-button" href="https://console.cloud.google.com/billing" target="_blank" rel="noopener noreferrer">查看额度／账单（新窗口）</a>
+            <p class="fine">登录 Google Cloud 后选择对应项目的结算账号，查看费用、赠金及用量；免费额度不等于账户余额。</p>
+            <label>Voice<input v-model="speechSettings.google.voice" placeholder="en-US-Neural2-F" autocomplete="off" /></label>
+            <div class="speech-key-row"><label>API Key<span class="speech-key-input"><input v-model="speechKeys.google" type="password" autocomplete="new-password" :placeholder="speechSettings.google.key_set ? '*****' : '请输入 API Key'" :disabled="speechClear.google" aria-describedby="google-key-help" /><span class="speech-key-status" role="status">{{ speechSettings.google.key_set ? '已设置' : '未设置' }}</span></span></label><button type="button" class="secondary" :disabled="busy || speechClear.google" @click="testSpeechProvider('google')">测试一下</button></div>
+            <p id="google-key-help" class="fine">{{ speechSettings.google.key_set ? '***** 表示服务器已保存密钥；留空保留，输入新密钥则替换。' : '填写密钥后保存；也可先点击“测试一下”。' }}</p>
+            <label class="speech-check"><input v-model="speechClear.google" type="checkbox" />保存时清除 Google key</label>
+          </fieldset>
+          </div>
+          <p class="fine">“测试一下”使用该服务当前填写的音色、区域与密钥（密钥留空则用已保存密钥），不保存设置、不走备用或缓存，可能产生少量费用。播放开始不代表扬声器一定有声音，请实际试听。</p>
+          <div class="content-tools"><button class="primary" :disabled="busy">保存设置</button><button type="button" class="secondary" :disabled="busy" @click="testSpeech">试听已保存配置</button></div>
+        </form>
+        <h2>语音缓存</h2>
+        <p v-if="speechCache" role="status">{{ speechCache.files }} 个文件，已用 {{ cacheSize(speechCache.bytes) }} / {{ cacheSize(speechCache.max_bytes) }}</p>
+        <p class="fine">按文本、服务和音色去重，单词／例句共用缓存。上限 100 MiB，超限删除最旧文件；缓存不属于备份内容。</p>
+        <div class="content-tools"><button class="secondary" :disabled="busy" @click="refreshSpeechCache">刷新容量</button><button class="text-button danger" :disabled="busy" @click="clearSpeechCache">清空缓存</button></div>
+      </section>
       <section v-else-if="page === 'backup'" class="panel database-panel" aria-labelledby="personal-heading">
         <h1 id="personal-heading">个人备份</h1><p>所有用户均可备份自己的全部词库、学习历史和进度；不包含用户名或密码。个人 JSON 备份与整库 SQLite 备份不兼容。</p>
         <form @submit.prevent="exportPersonalBackup"><fieldset :disabled="busy" class="database-fields"><legend>下载个人备份</legend><label>再次输入当前密码<input v-model="personalExportPassword" type="password" autocomplete="current-password" required /></label><button class="secondary" :disabled="busy || !personalExportPassword">下载个人 JSON 备份</button></fieldset></form>

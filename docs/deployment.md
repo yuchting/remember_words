@@ -7,8 +7,18 @@
 - 看中文输入英文、提示、不会、错词轮次、断点续学、幂等提交。
 - 10 分钟、1/3/7/14/30 天间隔；最后阶段维持 30 天。
 - 导入完整例句和译文、免费词典查词、词典音频、浏览器英语 TTS。
-- 词典不能保证中文译文或完整例句，缺失可手工补充。首版没有接入文本生成或云端语音付费服务，不保证所有设备的 TTS 可用。
+- 词典不能保证中文译文或完整例句，缺失可手工补充。可选 Azure / Google 云端语音主备用，配置教程见 [README 云端朗读](../README.md#云端朗读azure--google-配置教程)。没有文本生成；不保证所有设备的 TTS 可用。
 - 首版没有 Android、离线同步、自动备份定时任务。
+
+## 云端语音运维
+
+- 家长／admin 在“云端朗读”保存主备用服务、API key、Azure Region 和 Voice；默认音色 Azure `en-US-JennyNeural`、Google `en-US-Neural2-F`，语速固定 `0.9`。设备回退默认关闭。完整申请步骤、价格和音色链接见 README。
+- 云端请求由服务器发起。允许服务器访问 Azure Speech、Google Cloud Text-to-Speech；不要将 key 放进前端构建变量、URL、日志或截图。Google key 建议限制 API 和服务器出口 IP，不设浏览器 referrer 限制。
+- 数据库目录的 `speech/settings.json` 独立保存设置及密钥，权限 `600`，重启保留。不属于数据库备份；个人／整库导出均不包含密钥或音频缓存。迁移主机时需另行安全配置；限制整个 speech 目录权限。
+- 后台通过 `GET /api/admin/speech/cache` 查看 `files`、`bytes`、`max_bytes`，确认后 `DELETE /api/admin/speech/cache` 清空。音频按文本、服务、音色去重；单词／例句可共用缓存。优先检查配置中主备用缓存，容量 `100 MiB`，超限按生成时间 FIFO 删除，不是 LRU。清空后可能增加下一次合成费用。
+- 本站限速每账户每分钟 30 次；上游另有额度／限流。没有字符统计或月额度 UI；请在服务商控制台监控用量与预算。
+- `GET /api/admin/speech` 不返回 key，PUT 不接受 `key_set`；key 留空保留，`clear_key` 显式清除。`POST /api/admin/speech/test` 只使用已保存设置朗读固定文本。
+- 排障先核对区域、voice、密钥、API 启用、结算和服务器出口网络。真实云端合成、浏览器自动播放及目标设备英语语音仍须现场验收。
 
 ## 环境和启动
 

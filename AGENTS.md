@@ -1,6 +1,6 @@
 # AI 开发速查
 
-局域网家庭单词记忆应用：中文提示、英文输入；家长管理孩子账户。用户操作与配置见 `README.md`，本文件只保留开发约束。当前不做公网注册、APK、离线同步、生成服务或云端 TTS。
+局域网家庭单词记忆应用：中文提示、英文输入；家长管理孩子账户。用户操作与配置见 `README.md`，本文件只保留开发约束。当前不做公网注册、APK、离线同步或通用生成服务。云端 TTS 支持 Azure/Google，由家长后台配置主备服务。
 
 ## 栈与文件
 
@@ -31,19 +31,19 @@
 - 个人备份 `user_backup.py`：所有用户仅导出/覆盖自己的学习数据，不包含账户名/密码/会话；文件内部 ID 重新映射，不能跨账户写入。恢复单事务、先自动备份、取消恢复批次，不改账户、不影响他人；2 MiB 上限和严重确认。
 - 整库管理 `database_admin.py`：仅家长、再次验证密码；恢复是覆盖非合并，前端严重警告+勾选+中文确认+二次确认，后端校验确认标记。50 MiB 上限；校验 schema/完整性/外键/可用家长，恢复前自动备份，所有会话失效；不执行上传 SQL。main 的单 worker API gate 确保恢复无在途写入；不得绕开。
 - 不提交数据库、备份、密钥、`.env`、`.venv/`、`.run/`、node_modules、dist、测试缓存。测试用临时 WORDS_DB，禁止污染正式库。
-- 词典固定 Free Dictionary API；只发送单词，返回内容按纯文本展示。例句/译文支持导入和手工补齐。音频错误或加载超时回退设备英语 TTS；无英语语音需提示，URL 存在不等于播放已验收。
+- 词典固定 Free Dictionary API；只发送单词，返回内容按纯文本展示。例句/译文支持导入和手工补齐。未启用云端朗读时，音频错误或加载超时回退设备英语 TTS；启用后按 Azure/Google 主备配置合成，设备回退须显式开启。密钥独立存储，不进入数据库备份；音频缓存上限 100 MiB，家长可查看容量与清空。无英语语音需提示，URL 存在不等于播放已验收。
 
 ## 修改与检查
 
 保持小结构、标准库优先，不加无需求分层。改 API 同步前端类型；依赖变更同步锁文件；路径用 pathlib，输出路径用 `/`。保留用户工作，不擅自提交、推送或覆盖数据。
 
 ```sh
-.venv/bin/python -m unittest backend.tests.check_core backend.tests.check_management backend.tests.check_sources backend.tests.check_database_admin backend.tests.check_user_backup -v
+.venv/bin/python -m unittest backend.tests.check_core backend.tests.check_management backend.tests.check_sources backend.tests.check_database_admin backend.tests.check_user_backup backend.tests.check_sop backend.tests.check_speech -v
 npm --prefix frontend test
 npm --prefix frontend run build
 bash -n sop.sh
 ```
 
-非平凡逻辑留可运行检查；交互需浏览器验证，发音需目标设备。脚本测试用空闲端口、临时库，结束清理自己的服务，不停止其他程序。`sop.sh` 默认端口变更不能假定无冲突。
+新增功能或修复须同步新增或更新测试，覆盖正常、边界和失败路径；交互需浏览器验证，发音需目标设备，未验证项须注明。脚本测试用空闲端口、临时库，结束清理自己的服务，不停止其他程序。`sop.sh` 默认端口变更不能假定无冲突。
 
 文档分工：`README.md` 用户入口；`docs/deployment.md` 运维；`docs/acceptance.md` 真实验证及缺口；`docs/dev_plan.md` 目标而非完成清单；`docs/sample_words.json` 样例。行为变化同步文档，不把 mock 或构建通过写成真实联网/实机通过。

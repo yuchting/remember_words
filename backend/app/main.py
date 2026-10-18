@@ -20,12 +20,14 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 
+from . import speech
 from .db import ROOT, connect, initialize
 from .study import add_round, content, current_item, finish_round, normalize, submit
 
 hasher = PasswordHasher()
 DUMMY_HASH = hasher.hash(secrets.token_urlsafe(24))
 failures = defaultdict(deque)
+speech_requests = defaultdict(deque)
 COOKIE = 'words_session'
 SECURE = os.environ.get('WORDS_HTTPS', '0') == '1'
 BASE_PATH = os.environ.get('WORDS_BASE_PATH', '').rstrip('/')
@@ -198,6 +200,91 @@ def patch_user(uid: int, data: UserPatch, account=Depends(parent)):
             db.execute('UPDATE users SET is_active=? WHERE id=?', (data.is_active, uid))
         db.execute('DELETE FROM auth_sessions WHERE user_id=?', (uid,))
     return {'ok': True}
+
+
+@app.get('/api/admin/speech')
+def speech_settings(account=Depends(parent)):
+    return speech.public(speech.load())
+
+
+@app.put('/api/admin/speech')
+def speech_save(data: speech.Settings, account=Depends(parent)):
+    return speech.save(data)
+
+
+@app.get('/api/speech/settings')
+def speech_status(account=Depends(user)):
+    settings = speech.load()
+    return {'enabled': settings.primary != 'off', 'browser_fallback': settings.browser_fallback}
+
+
+@app.get('/api/admin/speech/cache')
+def speech_cache(account=Depends(parent)):
+    return speech.cache_stats()
+
+
+@app.delete('/api/admin/speech/cache')
+def speech_cache_clear(account=Depends(parent)):
+    return speech.clear_cache()
+
+
+class SpeechTestRequest(InputModel):
+    provider: str = Field(pattern=r'^(azure|google)$')
+    config: speech.Provider
+
+
+@app.post('/api/admin/speech/test-provider')
+async def speech_test_provider(data: SpeechTestRequest, account=Depends(parent)):
+    config = data.config.model_copy(deep=True)
+    if config.clear_key:
+        raise HTTPException(422, '请先填写 API Key，或取消清除密钥')
+    if not config.key:
+        config.key = getattr(speech.load(), data.provider).key
+    if not config.key or not all(c.isascii() and (c.isalnum() or c in '_-') for c in config.key):
+        raise HTTPException(422, '请填写有效的 API Key')
+    try:
+        async with httpx.AsyncClient(timeout=12, follow_redirects=False) as client:
+            audio = await speech.synthesize(client, data.provider, config, 'Hello! Apple, banana, wonderful.')
+        if not speech.valid_audio(audio):
+            raise ValueError('invalid MP3')
+    except (httpx.HTTPError, ValueError, KeyError, TypeError):
+        raise HTTPException(502, '测试失败，请检查 API Key、区域、音色、额度或服务器网络') from None
+    return Response(audio, media_type='audio/mpeg')
+
+
+@app.post('/api/admin/speech/test')
+async def speech_test(account=Depends(parent)):
+    return Response(await speech.audio('Hello! Welcome to English practice. Apple, banana, wonderful.'), media_type='audio/mpeg')
+
+
+class SpeechRequest(InputModel):
+    word_id: int = Field(gt=0)
+    kind: str = Field(pattern=r'^(word|example)$')
+
+
+@app.post('/api/speech')
+async def speak_word(data: SpeechRequest, account=Depends(user)):
+    queue = speech_requests[account['id']]
+    now = time.monotonic()
+    while queue and queue[0] < now - 60:
+        queue.popleft()
+    if len(queue) >= 30:
+        raise HTTPException(429, '朗读请求过多，请稍后再试')
+    queue.append(now)
+    with connect() as db:
+        row = db.execute('''SELECT w.* FROM words w JOIN decks d ON d.id=w.deck_id
+            WHERE w.id=? AND d.user_id=?''', (data.word_id, account['id'])).fetchone()
+        if not row:
+            raise HTTPException(404, '词条不存在')
+        allowed = db.execute('''SELECT 1 FROM study_items i JOIN study_sessions s ON s.id=i.session_id
+            LEFT JOIN attempts a ON a.item_id=i.id WHERE i.word_id=? AND s.user_id=?
+            AND (i.hint_used=1 OR a.id IS NOT NULL) LIMIT 1''', (data.word_id, account['id'])).fetchone()
+        if not allowed:
+            raise HTTPException(403, '请先提交答案或查看提示')
+        text = row[data.kind]
+        if not text.strip():
+            raise HTTPException(422, '暂无可朗读内容')
+    return Response(await speech.audio(text), media_type='audio/mpeg')
 
 
 class ImportData(InputModel):

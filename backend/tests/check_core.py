@@ -226,30 +226,88 @@ class CoreChecks(unittest.TestCase):
         sid = self.post(f'/api/decks/{deck}/study').json()['id']
         item = self.client.get(f'/api/study/{sid}/next').json()['item']
         base = f'/api/study/{sid}/items/{item["id"]}'
+
+        def snapshot():
+            with connect() as db:
+                return (
+                    [tuple(row) for row in db.execute('SELECT stage,due_at FROM words ORDER BY id')],
+                    [tuple(row) for row in db.execute('SELECT * FROM attempts ORDER BY id')],
+                    db.execute('SELECT round_number FROM study_sessions WHERE id=?', (sid,)).fetchone()[0],
+                    [tuple(row) for row in db.execute('SELECT * FROM study_items ORDER BY id')],
+                )
+
+        initial = snapshot()
+        self.assertEqual(self.post(base + '/answer', {'answer': 'hello', 'practice': True}).status_code, 409)
+        self.assertEqual(snapshot(), initial)
         first = self.post(base + '/answer', {'answer': 'bad'}).json()
         self.assertTrue(first['practice_pending'])
         self.assertFalse(first['round_finished'])
+        pending = snapshot()
+        self.assertEqual(pending[0], initial[0])
+        self.assertEqual(len(pending[1]), 1)
+        self.assertEqual(pending[2], 1)
+        self.login('bob')
+        for path, payload in (
+            (base + '/answer', {'answer': 'hello', 'practice': True}),
+            (base + '/reveal', None),
+            (f'/api/study/{sid}/round-action', {'action': 'finish', 'round_number': 1}),
+            (f'/api/study/{sid}/round-action', {'action': 'interrupt', 'round_number': 1}),
+        ):
+            with self.subTest(path=path, payload=payload):
+                self.assertEqual(self.post(path, payload).status_code, 404)
+                self.assertEqual(snapshot(), pending)
         self.login('alice')
         restored = self.client.get(f'/api/study/{sid}/next').json()['item']
         self.assertEqual(restored['id'], item['id'])
         self.assertTrue(restored['practice_pending'])
-        for payload in ({'answer': 'hello'}, {'answer': 'bad', 'practice': True}, {'skip': True, 'practice': True}):
-            self.assertTrue(self.post(base + '/answer', payload).json()['practice_pending'])
-        self.assertEqual(self.post(f'/api/study/{sid}/round-action', {'action': 'finish', 'round_number': 1}).status_code, 409)
+        for payload in ({'answer': 'bad'}, {'answer': 'hello'}, {'answer': 'bad', 'practice': True}, {'skip': True, 'practice': True}):
+            with self.subTest(payload=payload):
+                response = self.post(base + '/answer', payload)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertTrue(response.json()['practice_pending'])
+                self.assertEqual(snapshot(), pending)
+        for action in ('finish', 'interrupt'):
+            self.assertEqual(self.post(f'/api/study/{sid}/round-action', {'action': action, 'round_number': 1}).status_code, 409)
+            self.assertEqual(snapshot(), pending)
         self.assertEqual(self.client.get(f'/api/study/{sid}/rounds/1').status_code, 409)
-        self.post(base + '/reveal')
+        self.assertEqual(self.post(base + '/reveal').status_code, 200)
         done = self.post(base + '/answer', {'answer': 'HELLO', 'practice': True}).json()
         self.assertFalse(done['correct'])
         self.assertFalse(done['practice_pending'])
         self.assertTrue(done['round_finished'])
-        self.post(base + '/answer', {'answer': 'HELLO', 'practice': True})
+        advanced = snapshot()
+        self.assertEqual(advanced[0], initial[0])
+        self.assertEqual(advanced[1], pending[1])
+        self.assertEqual(advanced[2], 2)
+        for payload in ({'answer': 'bad'}, {'answer': 'HELLO', 'practice': True}):
+            response = self.post(base + '/answer', payload)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(snapshot(), advanced)
         report = self.client.get(f'/api/study/{sid}/rounds/1').json()
         self.assertEqual((report['correct'], report['wrong']), (0, 1))
         with connect() as db:
             self.assertEqual(db.execute('SELECT stage FROM words').fetchone()[0], -1)
             self.assertEqual(tuple(db.execute('SELECT answer,correct FROM attempts').fetchone()), ('bad', 0))
             self.assertEqual(db.execute('SELECT count(*) FROM study_items').fetchone()[0], 2)
-        self.assertEqual(self.client.get(f'/api/study/{sid}/next').json()['item']['round_number'], 2)
+        retry = self.client.get(f'/api/study/{sid}/next').json()['item']
+        self.assertEqual(retry['round_number'], 2)
+        retry_base = f'/api/study/{sid}/items/{retry["id"]}'
+        with patch('backend.app.main.time.time', return_value=1000):
+            response = self.post(retry_base + '/answer', {'answer': 'hello'})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()['complete'])
+        complete = snapshot()
+        self.assertEqual(complete[0], [(0, 1600)])
+        self.assertEqual(len(complete[1]), 2)
+        self.assertEqual(complete[2], 2)
+        for path, payload in (
+            (retry_base + '/answer', {'answer': 'hello'}),
+            (base + '/answer', {'answer': 'bad'}),
+            (base + '/answer', {'answer': 'HELLO', 'practice': True}),
+        ):
+            response = self.post(path, payload)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(snapshot(), complete)
 
     def test_schedule(self):
         self.assertEqual(schedule(-1, False, 100), (0, 700))
