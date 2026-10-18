@@ -1,13 +1,13 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch, onUnmounted } from 'vue'
 import { deckStatistics, errorMessage, parseImport, reviewComplete } from './utils'
 
 type User = { id: number; username: string; role: string; is_active?: boolean | number }
 type Deck = { id: number; name: string; total: number; due: number; learned?: number; started_at?: string }
 type Progress = { id: number; round_number: number; total: number; answered: number; correct: number; remaining: number }
-type Item = Progress & { meaning: string }
+type Item = Progress & { meaning: string; practice_pending?: boolean }
 const activeStudy = ref<Progress | null>(null)
-type Content = { word: string; meaning: string; example?: string; example_translation?: string; audio?: string; phonetic?: string; correct?: boolean; complete?: boolean; word_id?: number; definitions?: string[] }
+type Content = { practice_pending?: boolean; practice?: boolean; spelling_correct?: boolean; word: string; meaning: string; example?: string; example_translation?: string; audio?: string; phonetic?: string; correct?: boolean; complete?: boolean; word_id?: number; definitions?: string[] }
 type Summary = { attempts: number; correct: number }
 type ImportWord = { word: string; meaning: string; example?: string; example_translation?: string }
 type Preview = { items: ImportWord[]; duplicates: { word: string; indices: number[] }[] }
@@ -71,6 +71,61 @@ const content = ref<Content | null>(null)
 const summary = ref<Summary | null>(null)
 const answer = ref('')
 const answered = ref(false)
+let lastInputAt = 0
+let fluent = false
+let inputCount = 0
+function resetFluency() {
+  lastInputAt = performance.now(); fluent = !item.value?.practice_pending; inputCount = 0
+}
+function trackInput(insertion: boolean) {
+  const now = performance.now()
+  fluent = fluent && insertion && now - lastInputAt < 1000
+  lastInputAt = now; inputCount++
+}
+function beforeInput(event: Event) {
+  const input = event.target as HTMLInputElement
+  if (input.selectionStart !== input.value.length || input.selectionEnd !== input.value.length) fluent = false
+}
+function nativeInput(event: Event) {
+  const e = event as InputEvent
+  const input = event.target as HTMLInputElement
+  trackInput(e.inputType === 'insertText' && !e.isComposing && !!e.data && [...e.data].length === 1 &&
+    input.selectionStart === input.value.length && input.selectionEnd === input.value.length)
+}
+const continueButton = ref<HTMLButtonElement | null>(null)
+const cooldownSeconds = ref(0)
+let cooldownUntil = 0
+let cooldownTimer: ReturnType<typeof setInterval> | undefined
+function clearCooldown() {
+  clearInterval(cooldownTimer); cooldownTimer = undefined
+  cooldownUntil = 0; cooldownSeconds.value = 0
+}
+function startCooldown(seconds = 2) {
+  clearCooldown()
+  cooldownUntil = performance.now() + seconds * 1000
+  cooldownSeconds.value = seconds
+  cooldownTimer = setInterval(() => {
+    cooldownSeconds.value = Math.max(0, Math.ceil((cooldownUntil - performance.now()) / 1000))
+    if (!cooldownSeconds.value) {
+      clearCooldown()
+      if (!editingExample.value && (document.activeElement === document.body || document.activeElement?.matches(':disabled'))) void nextTick(() => continueButton.value?.focus())
+    }
+  }, 100)
+}
+async function continueStudy() {
+  if (busy.value || !answered.value || performance.now() < cooldownUntil) return
+  await run(loadNext)
+}
+function studyEnter(event: KeyboardEvent) {
+  if (event.key !== 'Enter' || !session.value || !item.value || report.value || summary.value || editingExample.value) return
+  if (event.target !== document.body && event.target !== answerInput.value && event.target !== continueButton.value) return
+  if (event.isComposing || event.keyCode === 229) return
+  event.preventDefault()
+  if (event.repeat || busy.value) return
+  if (answered.value) void continueStudy()
+  else if (event.target === answerInput.value) void submit()
+}
+watch(session, clearCooldown, { flush: 'sync' })
 const editingExample = ref(false)
 const exampleDraft = ref('')
 const translationDraft = ref('')
@@ -340,8 +395,12 @@ async function changeWord(word: ManagedWord, reset: boolean) {
 async function showHistory(word: ManagedWord) {
   await run(async () => { history.value = await api<History>(`/words/${word.id}/history`); historyWord.value = word.word })
 }
-type RoundReport = { round_number: number; correct: number; wrong: number; unanswered: number; words: { word_id: number; word: string; meaning: string; evaluation: string; stage: number; due_at: number | null; next_round_probability: number }[] }
+type RoundReport = { round_number: number; correct: number; wrong: number; unanswered: number; words: { word_id: number; word: string; meaning: string; correct: boolean | number | null; evaluation: string; stage: number; due_at: number | null; next_round_probability: number }[] }
 const report = ref<RoundReport | null>(null)
+const reportWords = computed(() => [...(report.value?.words ?? [])].sort((a, b) => {
+  const rank = (word: RoundReport['words'][number]) => word.correct === null ? 1 : word.correct ? 2 : 0
+  return rank(a) - rank(b)
+}))
 const pendingReport = ref<number | null>(null)
 async function roundAction(action: 'interrupt' | 'finish') {
   if (!item.value || !confirm(action === 'interrupt' ? '放弃本轮全部答题和提示记录，不计成绩，下次从本轮开头重来？' : '提前结算本轮？只计已答成绩，错误和未答词进入下一轮。')) return
@@ -357,6 +416,7 @@ async function roundAction(action: 'interrupt' | 'finish') {
   })
 }
 async function loadNext() {
+  clearCooldown()
   clearAudio()
   if (pendingReport.value !== null) {
     report.value = await api<RoundReport>(`/study/${session.value}/rounds/${pendingReport.value}`)
@@ -368,7 +428,7 @@ async function loadNext() {
   item.value = data.item ?? null; summary.value = data.complete ? (data.summary ?? { attempts: 0, correct: 0 }) : null
   content.value = null; answer.value = ''; answered.value = false; editingExample.value = false
   if (data.complete) await refresh()
-  await nextTick(); answerInput.value?.focus()
+  await nextTick(); resetFluency(); answerInput.value?.focus()
 }
 async function showPreviousReport() {
   if (!activeStudy.value || activeStudy.value.round_number < 2) return
@@ -394,16 +454,24 @@ async function start(deck?: Deck) {
   })
 }
 async function reveal() {
-  await run(async () => { content.value = await api<Content>(`/study/${session.value}/items/${item.value?.id}/reveal`, 'POST') })
+  fluent = false
+  await run(async () => {
+    content.value = await api<Content>(`/study/${session.value}/items/${item.value?.id}/reveal`, 'POST')
+    speak(content.value.word, content.value.audio)
+  })
 }
 async function submit(skip = false) {
   if (answered.value || !item.value || (!skip && !answer.value.trim())) return
+  const fast = fluent && inputCount > 0 && performance.now() - lastInputAt < 1000 && !skip && !content.value
   await run(async () => {
-    const result = await api<Content & { round_finished?: boolean; round_number?: number }>(`/study/${session.value}/items/${item.value?.id}/answer`, 'POST', { answer: answer.value.trim(), skip })
+    const result = await api<Content & { round_finished?: boolean; round_number?: number }>(`/study/${session.value}/items/${item.value?.id}/answer`, 'POST', { answer: answer.value.trim(), skip, practice: !!item.value?.practice_pending })
     content.value = result
     if (result.round_finished) pendingReport.value = result.round_number!
     answered.value = true
+    startCooldown(result.correct && !result.practice ? (fast ? 1 : 2) : result.practice && result.spelling_correct ? 2 : 3)
+    speak(result.word, result.audio)
   })
+  await nextTick(); continueButton.value?.focus()
 }
 async function enrich() {
   if (!content.value?.word_id) return
@@ -433,6 +501,7 @@ function key(value: string) {
   const start = input?.selectionStart ?? answer.value.length
   const end = input?.selectionEnd ?? start
   const from = value === 'Backspace' && start === end ? Math.max(0, start - 1) : start
+  trackInput(value !== 'Backspace' && start === end && end === answer.value.length)
   answer.value = answer.value.slice(0, from) + (value === 'Backspace' ? '' : value) + answer.value.slice(end)
   nextTick(() => { input?.focus(); const position = from + (value === 'Backspace' ? 0 : value.length); input?.setSelectionRange(position, position) })
 }
@@ -464,10 +533,16 @@ function speak(text: string, audio?: string) {
   speechSynthesis.speak(utterance)
 }
 async function leaveStudy() {
+  clearCooldown()
   clearAudio()
   await run(async () => { await refresh(); session.value = null; item.value = null; content.value = null; summary.value = null; report.value = null; pendingReport.value = null })
 }
+onUnmounted(() => {
+  window.removeEventListener('keydown', studyEnter)
+  clearCooldown(); clearAudio()
+})
 onMounted(async () => {
+  window.addEventListener('keydown', studyEnter)
   try { user.value = await api<User>('/auth/me'); await refresh() }
   catch (cause) { if (user.value) error.value = cause instanceof Error ? cause.message : '加载失败' }
   finally { ready.value = true }
@@ -490,13 +565,13 @@ onMounted(async () => {
     </main>
     <main v-else-if="session" class="study-layout">
       <div class="section-heading"><button class="text-button" :disabled="busy" @click="leaveStudy">← 返回词库</button><span class="muted">{{ summary ? '本轮完成' : `第 ${item?.round_number ?? 1} 轮 · 已完成 ${item?.answered ?? 0}/${item?.total ?? '…'} · 剩余 ${item?.remaining ?? '…'} 词` }}</span></div>
-      <section v-if="report" class="panel"><h1>第 {{ report.round_number }} 轮报告</h1><p>正确 {{ report.correct }} · 错误 {{ report.wrong }} · 未答 {{ report.unanswered }}（不计分）</p><p class="fine">下一轮入选率按规则计算，不是记忆概率。阶段不是精确记忆分数。</p><ul><li v-for="word in report.words" :key="word.word_id"><strong>{{ word.word }}</strong> · {{ word.meaning }}：{{ word.evaluation }}；下一轮 {{ word.next_round_probability }}%；记忆阶段 {{ word.stage < 0 ? '未学' : word.stage }}；复习 {{ word.due_at ? new Date(word.due_at * 1000).toLocaleString() : '未安排' }}</li></ul><button :disabled="busy" @click="run(loadNext)">继续</button></section>
+      <section v-if="report" class="panel"><h1>第 {{ report.round_number }} 轮报告</h1><p>正确 {{ report.correct }} · 错误 {{ report.wrong }} · 未答 {{ report.unanswered }}（不计分）</p><p class="fine">下一轮入选率按规则计算，不是记忆概率。阶段不是精确记忆分数。</p><div class="table-scroll"><table><caption class="sr-only">本轮单词结果，错词优先</caption><thead><tr><th scope="col">单词</th><th scope="col">释义</th><th scope="col">结果</th><th scope="col">下一轮入选率</th><th scope="col">记忆阶段</th></tr></thead><tbody><tr v-for="word in reportWords" :key="word.word_id" :class="{ 'report-wrong': word.correct !== null && !word.correct }"><th scope="row" lang="en">{{ word.word }}</th><td>{{ word.meaning }}</td><td>{{ word.evaluation }}</td><td>{{ word.next_round_probability }}%</td><td>{{ word.stage < 0 ? '未学' : word.stage }}</td></tr></tbody></table></div><button :disabled="busy" @click="run(loadNext)">继续</button></section>
       <section v-else-if="summary" class="panel result-panel"><span class="result-mark">✓</span><p class="eyebrow">每次回忆，都算进步</p><h1>这一轮，完成了！</h1><div class="result-stats"><div><strong>{{ summary.attempts }}</strong><span>回答次数</span></div><div><strong>{{ summary.correct }}</strong><span>正确次数</span></div><div><strong>{{ summary.attempts ? Math.round(summary.correct / summary.attempts * 100) : 0 }}%</strong><span>正确率</span></div></div><p class="muted">让记忆休息一下，到期后再来巩固。</p><button class="primary" :disabled="busy" @click="leaveStudy">回到词库</button></section>
       <section v-else-if="item" class="panel study-panel">
         <div class="study-actions"><button :disabled="busy || pendingReport !== null" @click="roundAction('interrupt')">中断本轮，不计成绩</button><button :disabled="busy || pendingReport !== null" @click="roundAction('finish')">提前完结，结算已答</button></div>
         <p class="eyebrow">看中文 · 回忆英文</p><h1 class="meaning">{{ item.meaning }}</h1>
-        <form @submit.prevent="submit()"><label class="sr-only" for="answer">输入英文单词</label><input id="answer" ref="answerInput" v-model="answer" class="answer-input" lang="en" autocomplete="off" autocapitalize="none" :spellcheck="false" :disabled="busy || answered" placeholder="在这里输入英文" /><div class="study-actions"><button type="button" class="secondary" :disabled="busy || answered || !!content" @click="reveal">揭示答案</button><button type="button" class="secondary" :disabled="busy || answered" @click="submit(true)">不会，记一下</button><button class="primary" :disabled="busy || answered || !answer.trim()">提交答案</button></div></form>
-        <div v-if="content" class="answer-card" aria-live="polite"><p v-if="answered" :class="['answer-status', content.correct ? 'correct' : 'incorrect']">{{ content.correct ? '回答正确，记得不错！' : '还没记牢，再认识一次。' }}</p><div class="word-line"><h2>{{ content.word }}</h2><span class="muted">{{ content.phonetic }}</span><button class="audio-button" aria-label="播放单词发音" @click="speak(content.word, content.audio)">朗读单词</button></div><p>{{ content.meaning }}</p><ul v-if="content.definitions?.length" lang="en"><li v-for="definition in content.definitions.slice(0, 5)" :key="definition">{{ definition }}</li></ul><template v-if="content.example"><div class="example-line"><p lang="en">{{ content.example }}</p><button class="text-button" @click="speak(content.example!)">朗读例句</button></div><p class="muted">{{ content.example_translation }}</p></template><p v-else class="muted">暂无例句，可查词补全或手工添加。</p><div v-if="content.word_id" class="content-tools"><button class="secondary" :disabled="busy || editingExample" @click="enrich">查词补全</button><button class="text-button" :disabled="busy" @click="editExample">编辑例句与译文</button></div><form v-if="editingExample" class="example-editor" @submit.prevent="saveExample"><label>完整英文例句<textarea v-model="exampleDraft" lang="en" required maxlength="2000" rows="3" placeholder="填写完整英文句子"></textarea></label><label>完整中文译文<textarea v-model="translationDraft" required maxlength="2000" rows="3" placeholder="填写对应中文译文"></textarea></label><div class="content-tools"><button class="primary" :disabled="busy">保存例句与译文</button><button type="button" class="text-button" :disabled="busy" @click="editingExample = false">取消</button></div></form><p v-if="!answered" class="fine">看过答案也没关系，输入一遍加深印象，或选择“不会”。</p><button v-if="answered" class="primary wide" :disabled="busy" @click="run(loadNext)">{{ busy ? '正在加载…' : '继续 →' }}</button></div>
+        <form @submit.prevent="submit()"><label class="sr-only" for="answer">输入英文单词</label><input id="answer" ref="answerInput" v-model="answer" @beforeinput="beforeInput" @input="nativeInput" @paste="fluent = false" @cut="fluent = false" @drop="fluent = false" class="answer-input" lang="en" autocomplete="off" autocapitalize="none" :spellcheck="false" :disabled="busy || answered" placeholder="在这里输入英文" /><div class="study-actions"><button type="button" class="secondary" :disabled="busy || answered || !!content" @click="reveal">揭示答案</button><button type="button" class="secondary" :disabled="busy || answered" @click="submit(true)">不会，记一下</button><button class="primary" :disabled="busy || answered || !answer.trim()">提交答案</button></div></form>
+        <div v-if="content" class="answer-card" aria-live="polite"><p v-if="answered" :class="['answer-status', content.correct ? 'correct' : 'incorrect']">{{ content.practice && content.spelling_correct ? '巩固拼写正确；首次成绩不变。' : content.correct ? '回答正确，记得不错！' : '还没记牢，继续后重输同一个词。' }}</p><div class="word-line"><h2>{{ content.word }}</h2><span class="muted">{{ content.phonetic }}</span><button class="audio-button" aria-label="播放单词发音" @click="speak(content.word, content.audio)">朗读单词</button></div><p>{{ content.meaning }}</p><ul v-if="content.definitions?.length" lang="en"><li v-for="definition in content.definitions.slice(0, 5)" :key="definition">{{ definition }}</li></ul><template v-if="content.example"><div class="example-line"><p lang="en">{{ content.example }}</p><button class="text-button" @click="speak(content.example!)">朗读例句</button></div><p class="muted">{{ content.example_translation }}</p></template><p v-else class="muted">暂无例句，可查词补全或手工添加。</p><div v-if="content.word_id" class="content-tools"><button class="secondary" :disabled="busy || editingExample" @click="enrich">查词补全</button><button class="text-button" :disabled="busy" @click="editExample">编辑例句与译文</button></div><form v-if="editingExample" class="example-editor" @submit.prevent="saveExample"><label>完整英文例句<textarea v-model="exampleDraft" lang="en" required maxlength="2000" rows="3" placeholder="填写完整英文句子"></textarea></label><label>完整中文译文<textarea v-model="translationDraft" required maxlength="2000" rows="3" placeholder="填写对应中文译文"></textarea></label><div class="content-tools"><button class="primary" :disabled="busy">保存例句与译文</button><button type="button" class="text-button" :disabled="busy" @click="editingExample = false">取消</button></div></form><p v-if="!answered" class="fine">看过答案也没关系，输入一遍加深印象，或选择“不会”。</p><button v-if="answered" ref="continueButton" class="primary wide" :disabled="busy || cooldownSeconds > 0" @click="continueStudy">{{ busy ? '正在加载…' : cooldownSeconds > 0 ? `继续（${cooldownSeconds}秒）` : '继续 →' }}</button></div>
         <div v-if="!answered" class="keyboard-wrap"><button class="text-button keyboard-toggle" :aria-expanded="keyboard" @click="keyboard = !keyboard">{{ keyboard ? '收起软键盘' : '展开软键盘' }}</button><div v-if="keyboard" class="keyboard" aria-label="英文软键盘"><div v-for="row in rows" :key="row" class="keyboard-row"><button v-for="letter in row" :key="letter" :disabled="busy" @mousedown.prevent @click="key(letter)">{{ letter }}</button></div><div class="keyboard-row"><button :disabled="busy" @mousedown.prevent @click="key('-')">-</button><button :disabled="busy" @mousedown.prevent @click="key('\'')">'</button><button class="space-key" :disabled="busy" @mousedown.prevent @click="key(' ')">空格</button><button class="delete-key" aria-label="删除一个字符" :disabled="busy" @mousedown.prevent @click="key('Backspace')">⌫</button></div></div></div>
       </section>
       <section v-else class="panel"><p>学习内容暂未载入。</p><button class="primary" :disabled="busy" @click="run(loadNext)">重新加载</button></section>

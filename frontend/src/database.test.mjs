@@ -8,6 +8,8 @@ const utils = moduleUrl(await readFile(new URL('./utils.ts', import.meta.url), '
 const app = await readFile(new URL('./App.vue', import.meta.url), 'utf8')
 const script = app.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
   .replace('nextTick, onMounted,', 'nextTick,')
+  .replace(', onUnmounted }', ' }')
+  .replace('onUnmounted(() => {', 'onMounted(() => {')
   .replace('import.meta.env.BASE_URL', "'/words/'")
   .replace("from 'vue'",  `from '${import.meta.resolve('vue')}'`)
   .replace("from './utils'", `from '${utils}'`)

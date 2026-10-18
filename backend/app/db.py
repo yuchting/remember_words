@@ -6,7 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 DB_PATH = Path(os.environ.get('WORDS_DB', str(ROOT / 'data' / 'words.sqlite3')))
 
-SCHEMA = '''
+BASE_SCHEMA = '''
 CREATE TABLE IF NOT EXISTS users (
  id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL,
  role TEXT NOT NULL CHECK(role IN ('parent','child')), is_active INTEGER NOT NULL DEFAULT 1
@@ -47,6 +47,17 @@ CREATE TABLE IF NOT EXISTS dictionary_cache (
 PRAGMA user_version=1;
 '''
 
+SCHEMA = BASE_SCHEMA + '''
+ALTER TABLE study_items ADD COLUMN practice_pending INTEGER NOT NULL DEFAULT 0;
+PRAGMA user_version=2;
+'''
+
+
+def migrate(db: sqlite3.Connection) -> None:
+    if db.execute('PRAGMA user_version').fetchone()[0] == 1:
+        db.execute('ALTER TABLE study_items ADD COLUMN practice_pending INTEGER NOT NULL DEFAULT 0')
+        db.execute('PRAGMA user_version=2')
+
 
 @contextmanager
 def connect():
@@ -67,4 +78,10 @@ def connect():
 def initialize():
     with connect() as db:
         db.execute('PRAGMA journal_mode=WAL')
-        db.executescript(SCHEMA)
+        version = db.execute('PRAGMA user_version').fetchone()[0]
+        if version == 0:
+            db.executescript(SCHEMA)
+        elif version == 1:
+            migrate(db)
+        elif version != 2:
+            raise ValueError('不支持的数据库版本')

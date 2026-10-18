@@ -338,7 +338,8 @@ def next_question(sid: int, account=Depends(user)):
                 JOIN study_items i ON i.id=a.item_id WHERE i.session_id=?''', (sid,)).fetchone()
             return {'complete': True, 'summary': dict(row)}
         return {'complete': False, 'item': {'id': item['id'], 'meaning': item['meaning'],
-                'round_number': session['round_number'], **round_progress(db, sid, session['round_number'])}}
+                'round_number': session['round_number'], 'practice_pending': bool(item['practice_pending']),
+                **round_progress(db, sid, session['round_number'])}}
 
 
 @app.get('/api/study/{sid}/rounds/{number}')
@@ -374,6 +375,8 @@ def round_action(sid: int, data: RoundAction, account=Depends(user)):
         session = owned_session(db, sid, account)
         if session['status'] != 'active' or session['round_number'] != data.round_number:
             raise HTTPException(409, '轮次已变化，请刷新')
+        if db.execute('SELECT 1 FROM study_items WHERE session_id=? AND practice_pending=1', (sid,)).fetchone():
+            raise HTTPException(409, '请先完成当前词的巩固拼写')
         if data.action == 'interrupt':
             db.execute('''DELETE FROM attempts WHERE item_id IN
                 (SELECT id FROM study_items WHERE session_id=? AND round_number=?)''', (sid, data.round_number))
@@ -386,6 +389,7 @@ def round_action(sid: int, data: RoundAction, account=Depends(user)):
 class Answer(InputModel):
     answer: str = Field(default='', max_length=200)
     skip: bool = False
+    practice: bool = False
 
 
 def get_item(db, sid, iid):
@@ -419,7 +423,9 @@ def answer(sid: int, iid: int, data: Answer, account=Depends(user)):
             raise HTTPException(409, '请按当前题目顺序提交')
         if not data.answer.strip() and not data.skip:
             raise HTTPException(422, '请输入答案，或点击不会')
-        return submit(db, session, item, data.answer, data.skip, time.time())
+        if data.practice and not already:
+            raise HTTPException(409, '当前题尚未进入巩固')
+        return submit(db, session, item, data.answer, data.skip, time.time(), data.practice)
 
 
 class ExamplePatch(InputModel):

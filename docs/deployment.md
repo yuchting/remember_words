@@ -37,13 +37,13 @@ npm --prefix frontend run build
 sudo ./sop.sh service
 ```
 
-需要 Python 3.11+、Node.js 22.12+、npm、systemd。脚本原地安装依赖、构建前端、生成并启用 `words.service`，不安装或修改 Nginx，不复制代码到 `/opt`。重复执行用于更新，会重启应用；`sop.sh restart` 仅重启，不构建。
+需要 Python 3.11+、Node.js 22.12+、npm、systemd。脚本原地安装依赖、构建前端、生成并启用 `words.service`，不安装或修改 Nginx，不复制代码到 `/opt`。重复执行用于更新，会重启应用。`sop.sh start|restart` 在操作服务前补齐变化的锁定依赖，并按内容哈希决定是否构建；构建失败不停止旧服务。
 
 - 服务工作目录为执行脚本的项目目录，运行用户/组为项目目录所有者。项目在 `/root` 时服务以 root 运行；更推荐独立非特权用户拥有的项目目录。代码由 systemd 只读保护，仅项目 `data/` 可写。
 - 数据库固定为当前目录 `data/words.sqlite3`，整个 `/data/` 已被 Git 忽略，包括 WAL、SHM 和自动恢复备份。
 - 配置文件 `/etc/remember-words.env`；已有 Host、HTTPS、子路径设置保留，`WORDS_DB` 更新为当前目录绝对路径。配置采用无引号 `KEY=value`，不执行 shell。
 - 若旧 `WORDS_DB` 指向其他已存在数据库，脚本停服后用 SQLite backup 迁入，校验完整性并保留原库。新旧库同时存在时拒绝自动覆盖或选择，需人工核对；不要直接复制活跃数据库。
-- 首次默认根路径、HTTP Cookie、本机 `127.0.0.1:18765` 监听。反代 HTTPS `/words/` 时首次使用 `sudo WORDS_BASE_PATH=/words WORDS_HTTPS=1 ./sop.sh service`；已有配置以环境文件为准。修改路径后重新执行脚本以同步前端构建。
+- 首次默认根路径、HTTP Cookie、本机 `127.0.0.1:18765` 监听。反代 HTTPS `/words/` 时首次使用 `sudo WORDS_BASE_PATH=/words WORDS_HTTPS=1 ./sop.sh service`；已有配置以环境文件为准。修改路径后运行 `sudo ./sop.sh restart` 同步前端构建。启动/重启从 `systemctl show` 获取实际 `Environment`、`EnvironmentFiles`，按顺序只读解析文件，不执行 shell、不输出配置值；沿用安装器的无引号 `KEY=value` 格式，不支持的格式会安全报错，不操作旧服务。
 - 浏览器使用的域名/IP 必须加入 `WORDS_HOSTS`（不含端口，禁止 `*`）。后端只信任本机代理头。
 
 ```sh
@@ -107,6 +107,21 @@ npm --prefix frontend run dev
 ```
 
 Vite 代理 `/api` 到后端。修改后端监听环境或构建前端后，重启服务确保静态资源挂载更新。
+
+### 重启构建检查
+
+两种运行模式共用构建检查与 `.run/lock` 管理操作锁，锁覆盖依赖准备、构建和重启。`status` 不构建；`stop` 不准备依赖。不会修改 systemd 的监听或环境配置。
+
+输入 SHA-256 覆盖 `frontend/src`、`public`（若有）、`index.html`、`package.json`、锁文件、`tsconfig*.json`、`vite.config.*`、前端 `.env*`、`backend/app/**/*.py`、Python 依赖文件、构建脚本及有效 `WORDS_BASE_PATH`。未提交内容变化同样有效；后端代码变化也触发构建。构建时显式传入有效路径，覆盖 Vite 本地环境文件中的同名设置。
+
+同时校验 `frontend/dist` 全部文件内容；缺少 `index.html`、文件增删或手动构建覆盖都会重建。指纹保存在 `.run/build-input.hash`、`.run/build-dist.hash`；首次或删除缓存后重建。先构建到 `.run/build-dist`，成功才发布到 `frontend/dist`，失败不改旧产物、不执行停止/重启。原子性只覆盖构建失败保护；成功发布与服务重启不是跨进程事务。不要并行手动运行 npm 构建或修改源码。
+
+隔离检查（临时项目、mock npm/systemctl，不操作真实服务或数据库）：
+
+```sh
+python3 -m unittest backend.tests.check_sop -v
+bash -n sop.sh
+```
 
 ## 示例 JSON
 

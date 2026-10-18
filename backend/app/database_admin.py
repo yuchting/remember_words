@@ -34,10 +34,11 @@ def _schema(connection):
 def _validate(connection):
     connection.execute('PRAGMA query_only=ON')
     connection.execute('PRAGMA trusted_schema=OFF')
-    if connection.execute('PRAGMA user_version').fetchone()[0] != 1:
-        raise ValueError('仅支持当前数据库版本 1')
+    version = connection.execute('PRAGMA user_version').fetchone()[0]
+    if version not in (1, 2):
+        raise ValueError('仅支持数据库版本 1、2')
     with closing(sqlite3.connect(':memory:')) as expected:
-        expected.executescript(db.SCHEMA)
+        expected.executescript(db.BASE_SCHEMA if version == 1 else db.SCHEMA)
         if _schema(connection) != _schema(expected):
             raise ValueError('数据库结构不匹配，或包含额外表、索引、视图、触发器')
     if connection.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
@@ -159,6 +160,7 @@ def register(app, parent, hasher):
                     _validate(source)
                     with closing(sqlite3.connect(':memory:')) as snapshot:
                         source.backup(snapshot)
+                        db.migrate(snapshot)
                         _clear_sessions(snapshot)
                         try:
                             return _restore(snapshot)

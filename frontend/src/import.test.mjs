@@ -9,6 +9,8 @@ const app = await readFile(new URL('./App.vue', import.meta.url), 'utf8')
 const script = app.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
   .replace('import.meta.env.BASE_URL', "'/words/'")
   .replace('nextTick, onMounted,', 'nextTick,')
+  .replace(', onUnmounted }', ' }')
+  .replace('onUnmounted(() => {', 'onMounted(() => {')
   .replace("from 'vue'", `from '${import.meta.resolve('vue')}'`)
   .replace("from './utils'", `from '${utils}'`)
 const state = await import(moduleUrl(`const onMounted = () => {};\n${script}\nexport { source, driveUrl, sheets, selectedSheets, skipped, preview, loadDrive, previewImport, busy };`))

@@ -18,8 +18,8 @@ help() {
 用法：./sop.sh [start|stop|status|restart|admin|service]
   已安装 words.service 时，start/stop/status/restart 转交 systemctl。
   不带参数时显示此帮助。
-  start    未安装系统服务时：检查环境、补齐依赖、构建前端、后台启动
-  restart  先准备依赖和构建，再停止旧服务并启动
+  start    检查环境、补齐依赖、按内容变化构建前端，再启动
+  restart  两种模式均先检查依赖与构建；成功后才重启，未变跳过构建
   stop     优雅停止本脚本启动的服务
   service  安装或更新 systemd 服务（需 root 或 sudo）
   status   查看进程状态（不进入分页器）
@@ -84,7 +84,16 @@ stop_service() {
     fail "服务未在 10 秒内停止，未强制杀进程。请检查 PID $PID 和 $LOG"
 }
 
-prepare() {
+lock_operation() {
+    mkdir -p "$RUN"
+    chmod 700 "$RUN"
+    mkdir "$RUN/lock" 2>/dev/null || fail '已有管理操作进行中；若上次被强制中断，确认无操作后删除 .run/lock'
+    trap 'rmdir "$RUN/lock"' EXIT
+}
+
+prepare_build() {
+    WORDS_BASE_PATH="$("${PYTHON:-python3}" deploy/build_state.py normalize)"
+    export WORDS_BASE_PATH
     check_env
     if [[ ! -x "$PY" ]]; then
         "${PYTHON:-python3}" -m venv "$ROOT/.venv"
@@ -102,7 +111,32 @@ prepare() {
         npm --prefix frontend ci
         echo "$node_hash" > "$RUN/node.hash"
     fi
-    npm --prefix frontend run build
+    local input_hash dist_hash
+    input_hash="$("$PY" deploy/build_state.py inputs)"
+    dist_hash="$("$PY" deploy/build_state.py dist)"
+    if [[ -z "$dist_hash" || "$(cat "$RUN/build-input.hash" 2>/dev/null || true)" != "$input_hash" || "$(cat "$RUN/build-dist.hash" 2>/dev/null || true)" != "$dist_hash" ]]; then
+        # Stage output so a failed build cannot damage the running service's files.
+        local stage="$RUN/build-dist"
+        rm -rf "$stage"
+        WORDS_BASE_PATH="${WORDS_BASE_PATH:-}" npm --prefix frontend run build -- --outDir "$stage"
+        [[ -f "$stage/index.html" ]] || fail '构建未生成 index.html，保留旧服务与产物'
+        rm -rf "$RUN/previous-dist"
+        if [[ -e frontend/dist ]]; then mv frontend/dist "$RUN/previous-dist"; fi
+        if ! mv "$stage" frontend/dist; then
+            [[ ! -e "$RUN/previous-dist" ]] || mv "$RUN/previous-dist" frontend/dist
+            fail '无法发布前端产物，保留旧服务'
+        fi
+        dist_hash="$("$PY" deploy/build_state.py dist)"
+        echo "$input_hash" > "$RUN/build-input.hash"
+        echo "$dist_hash" > "$RUN/build-dist.hash"
+        rm -rf "$RUN/previous-dist"
+    else
+        echo '构建输入与产物未变，跳过前端构建'
+    fi
+}
+
+prepare() {
+    prepare_build
     if [[ -z "${WORDS_HOSTS:-}" ]]; then
         WORDS_HOSTS="$("$PY" - <<'PY'
 import socket
@@ -325,11 +359,23 @@ echo '管理：./sop.sh start|stop|status|restart；配置：/etc/remember-words
 echo "首次创建家长：$ROOT/.venv/bin/python -m backend.app.cli create-parent parent"
 }
 
-# Delegate before checking PID files or building; systemd owns the installed process.
+# systemd owns the process; prepare assets before any start/restart.
 if [[ "${WORDS_SKIP_SYSTEMD:-0}" != 1 && "$ACTION" =~ ^(start|stop|status|restart)$ ]] && command -v systemctl >/dev/null; then
     load_state="$(systemctl show words.service -p LoadState --value 2>/dev/null || true)"
     if [[ -n "$load_state" && "$load_state" != not-found ]]; then
-        exec systemctl --no-pager "$ACTION" words.service
+        if [[ "$ACTION" != status ]]; then lock_operation; fi
+        if [[ "$ACTION" == start || "$ACTION" == restart ]]; then
+            # Read effective unit settings, not caller environment or a hardcoded file.
+            WORDS_BASE_PATH="$(
+                { systemctl show words.service -p Environment --value &&
+                  systemctl show words.service -p EnvironmentFiles --value; } |
+                    "${PYTHON:-python3}" deploy/build_state.py base
+            )"
+            export WORDS_BASE_PATH
+            prepare_build
+        fi
+        systemctl --no-pager "$ACTION" words.service
+        exit
     fi
 fi
 
@@ -349,10 +395,7 @@ case "$ACTION" in
     start|restart|stop) ;;
     *) help; exit 1 ;;
 esac
-mkdir -p "$RUN"
-chmod 700 "$RUN"
-mkdir "$RUN/lock" 2>/dev/null || fail '已有管理操作进行中；若上次被强制中断，确认无操作后删除 .run/lock'
-trap 'rmdir "$RUN/lock"' EXIT
+lock_operation
 if [[ "$ACTION" == stop ]]; then stop_service; exit; fi
 if [[ "$ACTION" == start ]] && read_service; then echo "服务已运行，PID ${PID}；重启用 ./sop.sh restart"; exit; fi
 prepare

@@ -78,7 +78,7 @@ class DatabaseAdminChecks(unittest.TestCase):
         self.make_deck()
         self.login('parent')
         cases = [b'not sqlite',
-                 self.uploaded(lambda c: c.execute('PRAGMA user_version=2'))]
+                 self.uploaded(lambda c: c.execute('PRAGMA user_version=99'))]
         # 每次重新创建输入库，避免同名账户重复。
         mutations = [
             "CREATE TABLE extra(id)",

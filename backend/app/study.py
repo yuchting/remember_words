@@ -27,7 +27,7 @@ def current_item(db, session_id):
         JOIN study_sessions s ON s.id=i.session_id
         LEFT JOIN attempts a ON a.item_id=i.id
         WHERE i.session_id=? AND s.status='active' AND i.round_number=s.round_number
-        AND a.id IS NULL ORDER BY i.position LIMIT 1''',
+        AND (a.id IS NULL OR i.practice_pending=1) ORDER BY i.position LIMIT 1''',
         (session_id,)).fetchone()
 
 
@@ -35,21 +35,29 @@ def content(row):
     return {key: row[key] for key in ('word', 'meaning', 'example', 'example_translation', 'audio', 'phonetic')} | {'word_id': row['word_id']}
 
 
-def submit(db, session, item, answer, skip, now):
+def submit(db, session, item, answer, skip, now, practice=False):
     previous = db.execute('SELECT * FROM attempts WHERE item_id=?', (item['id'],)).fetchone()
+    matched = not skip and normalize(answer) == normalize(item['word'])
     if previous:
-        return content(item) | {'correct': bool(previous['correct']),
-                                'round_finished': session['status'] == 'complete' or item['round_number'] < session['round_number'],
-                                'round_number': item['round_number']}
-    correct = not skip and not item['hint_used'] and normalize(answer) == normalize(item['word'])
-    db.execute('INSERT INTO attempts(item_id,answer,correct,created_at) VALUES(?,?,?,?)',
-               (item['id'], answer, int(correct), now))
-    if current_item(db, session['id']) is None:
+        # Only explicit practice requests can finish practice; replaying first answer cannot.
+        if practice and item['practice_pending'] and matched:
+            db.execute('UPDATE study_items SET practice_pending=0 WHERE id=?', (item['id'],))
+        correct = bool(previous['correct'])
+    else:
+        correct = matched and not item['hint_used']
+        db.execute('INSERT INTO attempts(item_id,answer,correct,created_at) VALUES(?,?,?,?)',
+                   (item['id'], answer, int(correct), now))
+        db.execute('UPDATE study_items SET practice_pending=? WHERE id=?', (int(not correct), item['id']))
+    if (session['status'] == 'active' and item['round_number'] == session['round_number']
+            and current_item(db, session['id']) is None):
         finish_round(db, session, now)
-    return content(item) | {'correct': bool(correct), 'complete': current_item(db, session['id']) is None,
+    pending = bool(db.execute('SELECT practice_pending FROM study_items WHERE id=?', (item['id'],)).fetchone()[0])
+    return content(item) | {'correct': bool(correct), 'practice_pending': pending,
+                            'practice': bool(previous), 'spelling_correct': bool(matched),
+                            'complete': current_item(db, session['id']) is None,
                             'round_finished': current_item(db, session['id']) is None or db.execute(
-                                'SELECT round_number FROM study_sessions WHERE id=?', (session['id'],)).fetchone()[0] != session['round_number'],
-                            'round_number': session['round_number']}
+                                'SELECT round_number FROM study_sessions WHERE id=?', (session['id'],)).fetchone()[0] != item['round_number'],
+                            'round_number': item['round_number']}
 
 
 def finish_round(db, session, now):

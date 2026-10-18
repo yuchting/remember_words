@@ -96,6 +96,9 @@ class CoreChecks(unittest.TestCase):
             self.assertEqual(self.client.get(f'/api/study/{sid}/next').json()['item'], question)
             self.assertEqual(self.post('/api/reviews/study').json()['id'], sid)
             self.assertFalse(self.post(f'/api/study/{sid}/items/{iid}/answer', {'skip': True}).json()['correct'])
+            with connect() as db:
+                spelling = db.execute('SELECT w.word FROM words w JOIN study_items i ON i.word_id=w.id WHERE i.id=?', (iid,)).fetchone()[0]
+            self.post(f'/api/study/{sid}/items/{iid}/answer', {'answer': spelling, 'practice': True})
             if number == 1:
                 progress = self.client.get('/api/study/active').json()['session']
                 self.assertEqual((progress['answered'], progress['remaining']), (1, 1))
@@ -120,7 +123,9 @@ class CoreChecks(unittest.TestCase):
         shown = self.post(base + '/reveal').json()
         result = self.post(base + '/answer', {'answer': shown['word']})
         self.assertFalse(result.json()['correct'])
-        self.post(base + '/answer', {'answer': shown['word']})
+        replay = self.post(base + '/answer', {'answer': shown['word']}).json()
+        self.assertTrue(replay['practice_pending'])
+        self.post(base + '/answer', {'answer': shown['word'], 'practice': True})
         second = self.client.get(f'/api/study/{sid}/next').json()['item']
         self.assertNotEqual(second['id'], first['id'])
         expected = 'world' if shown['word'] == 'hello' else 'hello'
@@ -162,6 +167,9 @@ class CoreChecks(unittest.TestCase):
         for _ in range(2):
             item = self.client.get(f'/api/study/{review}/next').json()['item']
             self.post(f'/api/study/{review}/items/{item["id"]}/answer', {'skip': True})
+            with connect() as db:
+                spelling = db.execute('SELECT w.word FROM words w JOIN study_items i ON i.word_id=w.id WHERE i.id=?', (item['id'],)).fetchone()[0]
+            self.post(f'/api/study/{review}/items/{item["id"]}/answer', {'answer': spelling, 'practice': True})
         for _ in range(2):
             item = self.client.get(f'/api/study/{review}/next').json()['item']
             with connect() as db:
@@ -200,6 +208,48 @@ class CoreChecks(unittest.TestCase):
         self.assertEqual(saved.status_code, 200)
         self.login('bob')
         self.assertEqual(self.client.patch(f'/api/words/{info["word_id"]}', json={'example': 'x', 'example_translation': 'x'}, headers=self.headers).status_code, 404)
+
+    def test_schema_upgrade_preserves_data(self):
+        import sqlite3
+        from backend.app import db as database
+        with sqlite3.connect(':memory:') as connection:
+            connection.executescript(database.BASE_SCHEMA)
+            connection.execute("INSERT INTO users VALUES(1,'old','hash','parent',1)")
+            database.migrate(connection)
+            database.migrate(connection)
+            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0], 2)
+            self.assertEqual(connection.execute('SELECT username FROM users').fetchone()[0], 'old')
+            self.assertIn('practice_pending', [r[1] for r in connection.execute('PRAGMA table_info(study_items)')])
+
+    def test_persistent_practice_and_last_report(self):
+        deck = self.post('/api/decks/import', {'items': [{'word': 'hello', 'meaning': '你好'}]}).json()['id']
+        sid = self.post(f'/api/decks/{deck}/study').json()['id']
+        item = self.client.get(f'/api/study/{sid}/next').json()['item']
+        base = f'/api/study/{sid}/items/{item["id"]}'
+        first = self.post(base + '/answer', {'answer': 'bad'}).json()
+        self.assertTrue(first['practice_pending'])
+        self.assertFalse(first['round_finished'])
+        self.login('alice')
+        restored = self.client.get(f'/api/study/{sid}/next').json()['item']
+        self.assertEqual(restored['id'], item['id'])
+        self.assertTrue(restored['practice_pending'])
+        for payload in ({'answer': 'hello'}, {'answer': 'bad', 'practice': True}, {'skip': True, 'practice': True}):
+            self.assertTrue(self.post(base + '/answer', payload).json()['practice_pending'])
+        self.assertEqual(self.post(f'/api/study/{sid}/round-action', {'action': 'finish', 'round_number': 1}).status_code, 409)
+        self.assertEqual(self.client.get(f'/api/study/{sid}/rounds/1').status_code, 409)
+        self.post(base + '/reveal')
+        done = self.post(base + '/answer', {'answer': 'HELLO', 'practice': True}).json()
+        self.assertFalse(done['correct'])
+        self.assertFalse(done['practice_pending'])
+        self.assertTrue(done['round_finished'])
+        self.post(base + '/answer', {'answer': 'HELLO', 'practice': True})
+        report = self.client.get(f'/api/study/{sid}/rounds/1').json()
+        self.assertEqual((report['correct'], report['wrong']), (0, 1))
+        with connect() as db:
+            self.assertEqual(db.execute('SELECT stage FROM words').fetchone()[0], -1)
+            self.assertEqual(tuple(db.execute('SELECT answer,correct FROM attempts').fetchone()), ('bad', 0))
+            self.assertEqual(db.execute('SELECT count(*) FROM study_items').fetchone()[0], 2)
+        self.assertEqual(self.client.get(f'/api/study/{sid}/next').json()['item']['round_number'], 2)
 
     def test_schedule(self):
         self.assertEqual(schedule(-1, False, 100), (0, 700))

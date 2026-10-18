@@ -30,7 +30,7 @@ class UserBackupTests(unittest.TestCase):
                 connection.execute('''INSERT INTO words(id,deck_id,word,meaning,stage,due_at)
                     VALUES(?,?,?, ?,3,1000)''', (uid, uid, 'apple', '苹果'))
                 connection.execute('INSERT INTO study_sessions VALUES(?,?,?,?,?,?)', (uid, uid, uid, 'new', 'active', 1))
-                connection.execute('INSERT INTO study_items VALUES(?,?,?,?,?,?)', (uid, uid, uid, 1, 0, 0))
+                connection.execute('INSERT INTO study_items(id,session_id,word_id,round_number,position,hint_used) VALUES(?,?,?,?,?,?)', (uid, uid, uid, 1, 0, 0))
                 connection.execute('INSERT INTO attempts VALUES(?,?,?,?,?)', (uid, uid, 'apple', 1, 102.0))
         self.uid = 10
         app = FastAPI()
