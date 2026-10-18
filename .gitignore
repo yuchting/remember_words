@@ -4,8 +4,7 @@
 .env
 .env.*
 !.env.example
-data/*
-!data/.gitkeep
+/data/
 /backups/
 *.sqlite3*
 *.db

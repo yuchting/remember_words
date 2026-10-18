@@ -16,7 +16,8 @@ fail() { echo "错误：$*" >&2; exit 1; }
 help() {
     cat <<'HELP'
 用法：./sop.sh [start|stop|status|restart]
-  start    检查环境、补齐依赖、构建前端、后台启动（默认）
+  已安装 words.service 时，start/stop/status/restart 转交 systemctl。
+  start    未安装系统服务时：检查环境、补齐依赖、构建前端、后台启动（默认）
   restart  先准备依赖和构建，再停止旧服务并启动
   stop     优雅停止本脚本启动的服务
   status   查看进程状态
@@ -178,6 +179,14 @@ PY
         [[ "$scheme" == https ]] || echo '警告：HTTP 不加密密码与会话，仅在可信局域网临时使用。'
     fi
 }
+
+# Delegate before checking PID files or building; systemd owns the installed process.
+if [[ "${WORDS_SKIP_SYSTEMD:-0}" != 1 && "$ACTION" =~ ^(start|stop|status|restart)$ ]] && command -v systemctl >/dev/null; then
+    load_state="$(systemctl show words.service -p LoadState --value 2>/dev/null || true)"
+    if [[ -n "$load_state" && "$load_state" != not-found ]]; then
+        exec systemctl "$ACTION" words.service
+    fi
+fi
 
 case "$ACTION" in
     -h|--help|help) help; exit ;;

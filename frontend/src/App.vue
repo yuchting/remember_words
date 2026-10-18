@@ -191,7 +191,7 @@ async function restorePersonalBackup() {
 }
 
 async function api<T>(path: string, method = 'GET', body?: unknown, mode?: 'raw' | 'download', headers: Record<string, string> = {}): Promise<T> {
-  const response = await fetch(`/api${path}`, {
+  const response = await fetch(`${import.meta.env.BASE_URL}api${path}`, {
     method, credentials: 'same-origin',
     headers: { ...(body === undefined ? {} : { 'Content-Type': mode === 'raw' ? 'application/octet-stream' : 'application/json' }), ...(method === 'GET' ? {} : { 'X-CSRF-Token': csrf }), ...headers },
     body: body === undefined ? undefined : mode === 'raw' ? body as Blob : JSON.stringify(body),

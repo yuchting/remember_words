@@ -12,6 +12,10 @@
 - 词库改名、明细、删除、JSON 导出；单词释义与例句编辑、删除、记忆重置、真实答题趋势。
 - 免费词典解释与单词音频、设备 TTS 朗读例句。免费来源可能缺失，例句和译文可导入或手工补齐。
 
+## Linux 系统服务与反向代理
+
+运行 `sudo ./setup_service.sh` 原地安装或更新 systemd 服务，支持开机启动、故障重启；数据库位于本项目 `data/words.sqlite3`，已被 Git 忽略。脚本不安装或修改 Nginx。`./sop.sh start|stop|status|restart` 自动检测已安装服务并交由 `systemctl` 管理，未安装时使用原后台模式。HTTPS 子路径首次安装可用 `sudo WORDS_BASE_PATH=/words WORDS_HTTPS=1 ./setup_service.sh`；代理由用户手动配置。步骤见[部署文档](docs/deployment.md#systemd-本地服务)。
+
 ## 启动
 
 环境：macOS / Linux、Bash、Python 3.11+、Node.js 22.12+、npm。

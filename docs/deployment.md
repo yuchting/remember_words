@@ -29,6 +29,49 @@ npm --prefix frontend run build
 
 如 Python 环境版本不同导致安装失败，优先使用 Python 3.12 或 3.13。
 
+## systemd 本地服务
+
+项目根目录执行：
+
+```sh
+sudo ./setup_service.sh
+```
+
+需要 Python 3.11+、Node.js 22.12+、npm、systemd。脚本原地安装依赖、构建前端、生成并启用 `words.service`，不安装或修改 Nginx，不复制代码到 `/opt`。重复执行用于更新，会重启应用；`sop.sh restart` 仅重启，不构建。
+
+- 服务工作目录为执行脚本的项目目录，运行用户/组为项目目录所有者。项目在 `/root` 时服务以 root 运行；更推荐独立非特权用户拥有的项目目录。代码由 systemd 只读保护，仅项目 `data/` 可写。
+- 数据库固定为当前目录 `data/words.sqlite3`，整个 `/data/` 已被 Git 忽略，包括 WAL、SHM 和自动恢复备份。
+- 配置文件 `/etc/remember-words.env`；已有 Host、HTTPS、子路径设置保留，`WORDS_DB` 更新为当前目录绝对路径。配置采用无引号 `KEY=value`，不执行 shell。
+- 若旧 `WORDS_DB` 指向其他已存在数据库，脚本停服后用 SQLite backup 迁入，校验完整性并保留原库。新旧库同时存在时拒绝自动覆盖或选择，需人工核对；不要直接复制活跃数据库。
+- 首次默认根路径、HTTP Cookie、本机 `127.0.0.1:18765` 监听。反代 HTTPS `/words/` 时首次使用 `sudo WORDS_BASE_PATH=/words WORDS_HTTPS=1 ./setup_service.sh`；已有配置以环境文件为准。修改路径后重新执行脚本以同步前端构建。
+- 浏览器使用的域名/IP 必须加入 `WORDS_HOSTS`（不含端口，禁止 `*`）。后端只信任本机代理头。
+
+```sh
+./sop.sh status
+sudo ./sop.sh start
+sudo ./sop.sh restart
+sudo ./sop.sh stop
+journalctl -u words -n 100 --no-pager
+```
+
+`sop.sh` 检测到已安装 `words.service` 时直接转交 `systemctl`，保留其退出码；未安装时保留原后台脚本行为。首次创建家长账户，项目根目录执行（密码交互输入）：
+
+```sh
+.venv/bin/python -m backend.app.cli create-parent parent
+```
+
+### Nginx 手动配置（独立于安装脚本）
+
+`deploy/nginx-words.conf` 仅为参考模板。自行备份 Nginx 配置后，在目标 HTTPS server 内加入该模板内容，执行 `nginx -t`，成功后 reload。现有服务器入口为 `https://服务器:8183/words/`；安装脚本不会修改现有代理。
+
+`proxy_pass http://127.0.0.1:18765;` 不带尾斜杠，保留 `/words/` 前缀。前端构建与后端运行都需要 `WORDS_BASE_PATH=/words`；HTTPS 在 Nginx 终止时设置 `WORDS_HTTPS=1`，无需给 Uvicorn 配证书。
+
+```sh
+curl --noproxy '*' -k https://127.0.0.1:8183/words/api/health
+```
+
+`-k` 仅用于本机诊断，不代表客户端证书信任已验证。
+
 ## 局域网访问
 
 查找主机局域网 IP，例如 `192.168.1.100`，再启动：

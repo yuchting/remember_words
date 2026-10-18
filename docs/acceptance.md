@@ -1,11 +1,26 @@
 # 首版验收记录
 
+## 本地服务原地部署更新
+
+- `setup_service.sh` 已移除 Nginx 操作，运行当前项目代码；数据库固定 `data/words.sqlite3`，`/data/` 整目录由 Git 忽略。
+- 旧 `/var/lib/remember-words/words.sqlite3` 已停服后通过 SQLite backup 迁入 `/root/remember_words/data/words.sqlite3`，完整性检查通过，原库保留。现有 Nginx 未修改。
+- systemd 使用项目目录所有者运行；当前项目在 `/root`，实际用户为 root。代码只读保护，data 可写；推荐后续迁到非特权用户目录运行。
+- `bash backend/tests/check_service.sh` 验证 sop.sh 的 start/stop/restart/status 分派及退出码；安装脚本已实际执行，服务健康检查通过。
+
 ## 个人与整库备份更新
 
 - 个人 JSON 不含账户名、密码、会话；覆盖仅当前用户，内部 ID 重映射，历史与阶段保留，原活动批次取消。自动备份和事务失败回滚有测试。
 - 管理员整库 SQLite 导出清会话；恢复校验 schema、完整性、外键、可用家长与密码哈希资源边界，先备份再覆盖，失败回退有测试。
 - 前端两种恢复均有严重警告、风险勾选、精确确认文字、重新输入密码及二次确认。真实浏览器验证入口和默认禁用状态；完整恢复结果由临时数据库 API 自动检查验证，未覆盖正式数据。
 - 单 worker API gate 防止恢复与在途 API 交错；多进程访问同库不受支持。
+
+## 2026-10-18 系统服务与子路径部署
+
+- `words.service` 已启动并设置开机启用；专用 `words` 用户，后端仅监听 `127.0.0.1:18765`，数据库 `/var/lib/remember-words/words.sqlite3`。本次部署前未发现项目默认数据库，未迁移或覆盖旧库；尚未创建家长账户。
+- 现有 Nginx `8183 ssl` 的 server 块新增 `/words` 代理；配置备份 `/etc/nginx/nginx.conf.bak-words-20261018`。`nginx -t` 成功，reload 成功，其他 location 未修改。
+- 本机经真实 Nginx 请求：`/words` 返回 308；`/words/`、JS、CSS、`/words/api/health` 返回 200；`https://192.168.1.21:8183/words/api/health` 返回 `{"ok":true}`。curl 使用 `--noproxy '*' -k`，不代表客户端已信任证书。
+- 后端原检查 33 项通过；新增 `WORDS_BASE_PATH=/words npm --prefix frontend run build` 后执行 `.venv/bin/python -m backend.tests.check_subpath`，覆盖静态资源、Cookie 路径/Secure/HttpOnly、登录退出、CSRF、Origin、请求大小。前端测试通过。
+- 未重启操作系统验证实际自启；未进行此次 `/words/` 浏览器交互和目标设备发音验收。首次登录前需交互创建家长账户，命令见部署文档。
 
 ## 已通过
 

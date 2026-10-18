@@ -8,7 +8,8 @@ const utils = moduleUrl(await readFile(new URL('./utils.ts', import.meta.url), '
 const app = await readFile(new URL('./App.vue', import.meta.url), 'utf8')
 const script = app.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
   .replace('nextTick, onMounted,', 'nextTick,')
-  .replace("from 'vue'", `from '${import.meta.resolve('vue')}'`)
+  .replace('import.meta.env.BASE_URL', "'/words/'")
+  .replace("from 'vue'",  `from '${import.meta.resolve('vue')}'`)
   .replace("from './utils'", `from '${utils}'`)
 const state = await import(moduleUrl(`const onMounted = () => {};\n${script}\nexport { api, user, session, csrf, busy, error, notice, password, childPassword, resetPasswords, exportPassword, restorePassword, restoreFile, restoreConfirmation, restoreUnderstood, canRestore, selectRestoreFile, exportDatabase, restoreDatabase, personalPassword, personalFile, personalUnderstood, personalConfirmation, canRestorePersonal, restorePersonalBackup, personalExportPassword, exportPersonalBackup, selectPersonalFile };`))
 globalThis.window = {}
@@ -62,9 +63,9 @@ state.childPassword.value = 'child secret'
 state.resetPasswords.value = { 2: 'reset secret' }
 state.exportPassword.value = 'export secret'
 fetch = async (url, options) => {
-  if (url === '/api/auth/me') return Response.json({ csrf_token: 'csrf-test' })
+  if (url === '/words/api/auth/me') return Response.json({ csrf_token: 'csrf-test' })
   calls++
-  assert.equal(url, '/api/admin/database/restore')
+  assert.equal(url, '/words/api/admin/database/restore')
   assert.equal(options.method, 'POST')
   assert.equal(options.body, file)
   assert.equal(options.headers['Content-Type'], 'application/octet-stream')
@@ -94,7 +95,7 @@ let downloaded = false
 const link = { click() { downloaded = true }, remove() {} }
 globalThis.document = { createElement: () => link, body: { append() {} } }
 fetch = async (url, options) => {
-  assert.equal(url, '/api/admin/database/export')
+  assert.equal(url, '/words/api/admin/database/export')
   assert.equal(options.method, 'POST')
   assert.deepEqual(JSON.parse(options.body), { password: ' export 密码 ' })
   return new Response(new Blob(['SQLite backup']))
@@ -137,14 +138,14 @@ assert.ok(state.user.value)
 preparePersonal()
 state.session.value = 99
 fetch = async (url, options) => {
-  if (url === '/api/account/backup/restore') {
+  if (url === '/words/api/account/backup/restore') {
     personalCalls++
     assert.equal(options.method, 'POST')
     assert.deepEqual(JSON.parse(options.body), { password: ' child 密码 ', confirmation: 'OVERWRITE_MY_DATA', backup: { format: 'remember_words_user', version: 1, decks: [] } })
     return Response.json({ backup: 'personal-before.json' })
   }
-  if (url === '/api/decks') return Response.json([])
-  if (url === '/api/reviews/due') return Response.json({ count: 0 })
+  if (url === '/words/api/decks') return Response.json([])
+  if (url === '/words/api/reviews/due') return Response.json({ count: 0 })
   throw new Error(`意外请求 ${url}`)
 }
 await state.restorePersonalBackup()
@@ -166,7 +167,7 @@ assert.equal(personalCalls, 2, '读取期间确认变化不得上传旧文件')
 assert.match(state.error.value, /已变化/)
 state.personalExportPassword.value = ' child export '
 fetch = async (url, options) => {
-  assert.equal(url, '/api/account/backup/export')
+  assert.equal(url, '/words/api/account/backup/export')
   assert.deepEqual(JSON.parse(options.body), { password: ' child export ' })
   return Response.json({ format: 'remember_words_user', version: 1 })
 }

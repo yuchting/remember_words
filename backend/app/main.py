@@ -28,6 +28,13 @@ DUMMY_HASH = hasher.hash(secrets.token_urlsafe(24))
 failures = defaultdict(deque)
 COOKIE = 'words_session'
 SECURE = os.environ.get('WORDS_HTTPS', '0') == '1'
+BASE_PATH = os.environ.get('WORDS_BASE_PATH', '').rstrip('/')
+if BASE_PATH and (not BASE_PATH.startswith('/') or any(
+    not part or not all(c.isascii() and (c.isalnum() or c in '-_') for c in part)
+    for part in BASE_PATH[1:].split('/')
+)):
+    raise ValueError('WORDS_BASE_PATH 必须为空或 /words 形式的路径')
+COOKIE_PATH = BASE_PATH + '/'
 
 
 @asynccontextmanager
@@ -36,7 +43,7 @@ async def lifespan(app):
     yield
 
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(lifespan=lifespan, root_path=BASE_PATH)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=[
     host.strip() for host in os.environ.get('WORDS_HOSTS', 'localhost,127.0.0.1,testserver').split(',') if host.strip()
 ])
@@ -48,15 +55,21 @@ api_gate = asyncio.Lock()
 
 @app.middleware('http')
 async def api_exclusive(request, call_next):
-    if request.url.path.startswith('/api/'):
+    path = request.scope['path']
+    if BASE_PATH and path.startswith(BASE_PATH + '/'):
+        path = path[len(BASE_PATH):]
+    request.state.api_path = path
+    if path.startswith('/api/'):
         async with api_gate:
             return await limits(request, call_next)
     return await limits(request, call_next)
 
 
 async def limits(request, call_next):
-    if request.url.path.startswith('/api/'):
-        maximum = 50 * 1024 * 1024 if request.url.path == '/api/admin/database/restore' else 2 * 1024 * 1024
+    path = request.state.api_path
+    is_api = path.startswith('/api/')
+    if is_api:
+        maximum = 50 * 1024 * 1024 if path == '/api/admin/database/restore' else 2 * 1024 * 1024
         body = bytearray()
         async for chunk in request.stream():
             body.extend(chunk)
@@ -70,7 +83,7 @@ async def limits(request, call_next):
     response = await call_next(request)
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['Referrer-Policy'] = 'same-origin'
-    if request.url.path.startswith('/api/'):
+    if is_api:
         response.headers['Cache-Control'] = 'no-store'
     response.headers['X-Frame-Options'] = 'DENY'
     return response
@@ -138,7 +151,7 @@ def login(data: Login, request: Request, response: Response):
         db.execute('DELETE FROM auth_sessions WHERE expires_at<? OR token_hash=?',
                    (now, digest(request.cookies.get(COOKIE, ''))))
         db.execute('INSERT INTO auth_sessions VALUES(?,?,?,?)', (digest(token), row['id'], csrf, now + 7 * 86400))
-        response.set_cookie(COOKIE, token, httponly=True, secure=SECURE, samesite='lax', max_age=7 * 86400, path='/')
+        response.set_cookie(COOKIE, token, httponly=True, secure=SECURE, samesite='lax', max_age=7 * 86400, path=COOKIE_PATH)
         return {'id': row['id'], 'username': row['username'], 'role': row['role'], 'csrf_token': csrf}
 
 
@@ -151,7 +164,7 @@ def me(account=Depends(user)):
 def logout(request: Request, response: Response, account=Depends(user)):
     with connect() as db:
         db.execute('DELETE FROM auth_sessions WHERE token_hash=?', (digest(request.cookies.get(COOKIE, '')),))
-    response.delete_cookie(COOKIE)
+    response.delete_cookie(COOKIE, path=COOKIE_PATH)
     return {'ok': True}
 
 

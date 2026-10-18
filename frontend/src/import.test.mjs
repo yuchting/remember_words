@@ -7,6 +7,7 @@ const moduleUrl = code => `data:text/javascript;base64,${Buffer.from(ts.transpil
 const utils = moduleUrl(await readFile(new URL('./utils.ts', import.meta.url), 'utf8'))
 const app = await readFile(new URL('./App.vue', import.meta.url), 'utf8')
 const script = app.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
+  .replace('import.meta.env.BASE_URL', "'/words/'")
   .replace('nextTick, onMounted,', 'nextTick,')
   .replace("from 'vue'", `from '${import.meta.resolve('vue')}'`)
   .replace("from './utils'", `from '${utils}'`)
@@ -20,8 +21,8 @@ const result = {
 }
 let previewCalls = 0
 globalThis.fetch = async (url, options) => {
-  if (url === '/api/import/drive') return Response.json(result)
-  assert.equal(url, '/api/import/preview')
+  if (url === '/words/api/import/drive') return Response.json(result)
+  assert.equal(url, '/words/api/import/preview')
   previewCalls++
   const { items } = JSON.parse(options.body)
   assert.deepEqual(items, result.sheets.flatMap(sheet => sheet.items))
