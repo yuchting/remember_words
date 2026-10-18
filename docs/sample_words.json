@@ -1,0 +1,22 @@
+[
+  {
+    "id": 0,
+    "word": "hello",
+    "meaning": "你好",
+    "example": "She said hello to her new teacher.",
+    "example_translation": "她向新老师问好。"
+  },
+  {
+    "id": 0,
+    "word": "world",
+    "meaning": "世界",
+    "example": "We want to learn more about the world.",
+    "example_translation": "我们想更多地了解这个世界。"
+  },
+  {
+    "word": "apple",
+    "meaning": "苹果",
+    "example": "I eat an apple after lunch.",
+    "example_translation": "我午饭后吃一个苹果。"
+  }
+]
