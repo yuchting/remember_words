@@ -28,6 +28,8 @@
 - Cookie HttpOnly、SameSite；修改请求校验 CSRF、Origin；Host 允许名单指服务器地址，不是客户端名单。HTTPS 设置 Secure，HTTP 仅可信局域网临时使用。
 - SQL 参数绑定；密码 Argon2id，会话令牌只存哈希；日志不得含密码、令牌、Key。单 worker，登录限速为进程内状态。
 - SQLite 默认 `data/words.sqlite3`，外键 + WAL，`PRAGMA user_version` 管 schema；改结构提供升级方案，禁止删库解决问题。备份用 SQLite backup，不复制活跃数据库文件。
+- 个人备份 `user_backup.py`：所有用户仅导出/覆盖自己的学习数据，不包含账户名/密码/会话；文件内部 ID 重新映射，不能跨账户写入。恢复单事务、先自动备份、取消恢复批次，不改账户、不影响他人；2 MiB 上限和严重确认。
+- 整库管理 `database_admin.py`：仅家长、再次验证密码；恢复是覆盖非合并，前端严重警告+勾选+中文确认+二次确认，后端校验确认标记。50 MiB 上限；校验 schema/完整性/外键/可用家长，恢复前自动备份，所有会话失效；不执行上传 SQL。main 的单 worker API gate 确保恢复无在途写入；不得绕开。
 - 不提交数据库、备份、密钥、`.env`、`.venv/`、`.run/`、node_modules、dist、测试缓存。测试用临时 WORDS_DB，禁止污染正式库。
 - 词典固定 Free Dictionary API；只发送单词，返回内容按纯文本展示。例句/译文支持导入和手工补齐。音频错误或加载超时回退设备英语 TTS；无英语语音需提示，URL 存在不等于播放已验收。
 
@@ -36,7 +38,7 @@
 保持小结构、标准库优先，不加无需求分层。改 API 同步前端类型；依赖变更同步锁文件；路径用 pathlib，输出路径用 `/`。保留用户工作，不擅自提交、推送或覆盖数据。
 
 ```sh
-.venv/bin/python -m unittest backend.tests.check_core backend.tests.check_management backend.tests.check_sources -v
+.venv/bin/python -m unittest backend.tests.check_core backend.tests.check_management backend.tests.check_sources backend.tests.check_database_admin backend.tests.check_user_backup -v
 npm --prefix frontend test
 npm --prefix frontend run build
 bash -n sop.sh

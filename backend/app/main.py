@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import os
@@ -41,14 +42,26 @@ app.add_middleware(TrustedHostMiddleware, allowed_hosts=[
 ])
 
 
+# ponytail: single-worker API gate keeps restore exclusive; use maintenance mode before multi-worker deployment.
+api_gate = asyncio.Lock()
+
+
 @app.middleware('http')
+async def api_exclusive(request, call_next):
+    if request.url.path.startswith('/api/'):
+        async with api_gate:
+            return await limits(request, call_next)
+    return await limits(request, call_next)
+
+
 async def limits(request, call_next):
     if request.url.path.startswith('/api/'):
+        maximum = 50 * 1024 * 1024 if request.url.path == '/api/admin/database/restore' else 2 * 1024 * 1024
         body = bytearray()
         async for chunk in request.stream():
             body.extend(chunk)
-            if len(body) > 2 * 1024 * 1024:
-                return Response('请求超过 2 MiB', status_code=413)
+            if len(body) > maximum:
+                return Response('请求超过允许大小', status_code=413)
         request._body = bytes(body)
         if request.method not in ('GET', 'HEAD', 'OPTIONS'):
             origin = request.headers.get('origin')
@@ -457,6 +470,12 @@ async def enrich(wid: int, account=Depends(user)):
 
 from .management import register as register_management
 register_management(app, user, owned_word, cancel_word_sessions)
+
+from .database_admin import register as register_database_admin
+register_database_admin(app, parent, hasher)
+
+from .user_backup import register as register_user_backup
+register_user_backup(app, user, hasher)
 
 
 class PreviewData(InputModel):

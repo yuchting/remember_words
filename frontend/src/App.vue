@@ -72,11 +72,128 @@ const keyboard = ref(true)
 const isParent = computed(() => user.value?.role === 'parent' || user.value?.role === 'admin')
 const totalWords = computed(() => decks.value.reduce((sum, deck) => sum + deck.total, 0))
 const rows = ['qwertyuiop', 'asdfghjkl', 'zxcvbnm']
+const exportPassword = ref('')
+const restorePassword = ref('')
+const restoreFile = ref<File | null>(null)
+const restoreInput = ref<HTMLInputElement | null>(null)
+const restoreUnderstood = ref(false)
+const restoreConfirmation = ref('')
+const validRestoreFile = (file: File | null) => !!file && /\.(sqlite3|db)$/i.test(file.name) && file.size > 0 && file.size <= 50 * 1024 * 1024
+const canRestore = computed(() => isParent.value && validRestoreFile(restoreFile.value) && restoreUnderstood.value && restoreConfirmation.value === '确认覆盖整个数据库' && !!restorePassword.value)
+watch(restoreFile, () => { restoreUnderstood.value = false; restoreConfirmation.value = ''; restorePassword.value = '' }, { flush: 'sync' })
+watch([restoreUnderstood, restoreConfirmation], () => { restorePassword.value = '' }, { flush: 'sync' })
+function clearDatabaseForm() {
+  exportPassword.value = ''; restoreFile.value = null; restorePassword.value = ''; restoreUnderstood.value = false; restoreConfirmation.value = ''
+  if (restoreInput.value) restoreInput.value.value = ''
+}
+watch(user, () => { clearDatabaseForm() }, { flush: 'sync' })
+function selectRestoreFile(event: Event) {
+  if (busy.value) return
+  const input = event.target as HTMLInputElement
+  restoreFile.value = null
+  const file = input.files?.[0] ?? null
+  if (file && !validRestoreFile(file)) { error.value = '请选择非空 .sqlite3 或 .db 文件，最大 50 MiB'; input.value = ''; return }
+  error.value = ''; restoreFile.value = file
+}
+async function exportDatabase() {
+  if (!isParent.value || !exportPassword.value) return
+  await run(async () => {
+    try {
+      const blob = await api<Blob>('/admin/database/export', 'POST', { password: exportPassword.value }, 'download')
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a'); link.href = url; link.download = 'words-backup.sqlite3'
+      document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000)
+      notice.value = '数据库备份已下载。含密码哈希等敏感数据，请妥善保管，不要分享。'
+    } finally { exportPassword.value = '' }
+  })
+}
+async function restoreDatabase() {
+  if (busy.value || !canRestore.value) return
+  if (!confirm('确认覆盖整个数据库？当前所有账户、词库、学习记录将被备份替换，不会合并；所有人退出登录，必须使用备份内家长密码重新登录。此操作不可撤销，仅主机自动备份可回退。')) return
+  await run(async () => {
+    try {
+      const result = await api<{ backup: string }>('/admin/database/restore', 'POST', restoreFile.value!, 'raw', {
+        'X-Admin-Password': encodeURIComponent(restorePassword.value), 'X-Restore-Confirmation': 'OVERWRITE_ALL_DATA',
+      })
+      clearAudio(); user.value = null; session.value = null; csrf = ''; username.value = ''; password.value = ''; childPassword.value = ''; resetPasswords.value = {}
+      clearDatabaseForm(); decks.value = []; users.value = []; due.value = 0; item.value = null; content.value = null; summary.value = null; detail.value = null; wordDraft.value = null; history.value = null
+      clearSheets(); importText.value = ''; driveUrl.value = ''; targetUser.value = ''; page.value = 'decks'
+      notice.value = `整个数据库已覆盖恢复，所有人已退出登录。主机自动备份文件：${result.backup}。请使用备份内家长账号和密码登录。`
+    } catch (cause) {
+      if (cause instanceof TypeError) throw new Error('恢复请求连接中断，结果未知；请先重新登录核实数据库状态，不要直接重试覆盖恢复。')
+      throw cause
+    } finally { restorePassword.value = '' }
+  })
+}
 
-async function api<T>(path: string, method = 'GET', body?: unknown, mode?: 'raw' | 'download'): Promise<T> {
+const personalExportPassword = ref('')
+const personalPassword = ref('')
+const personalFile = ref<File | null>(null)
+const personalInput = ref<HTMLInputElement | null>(null)
+const personalUnderstood = ref(false)
+const personalConfirmation = ref('')
+const canRestorePersonal = computed(() => !!user.value && !!personalFile.value && personalUnderstood.value && personalConfirmation.value === '确认覆盖我的学习数据' && !!personalPassword.value)
+function clearPersonalForm() {
+  personalExportPassword.value = ''; personalFile.value = null; personalPassword.value = ''; personalUnderstood.value = false; personalConfirmation.value = ''
+  if (personalInput.value) personalInput.value.value = ''
+}
+watch(personalFile, () => { personalUnderstood.value = false; personalConfirmation.value = ''; personalPassword.value = '' }, { flush: 'sync' })
+watch([personalUnderstood, personalConfirmation], () => { personalPassword.value = '' }, { flush: 'sync' })
+watch(user, clearPersonalForm, { flush: 'sync' })
+function selectPersonalFile(event: Event) {
+  if (busy.value) return
+  const input = event.target as HTMLInputElement
+  personalFile.value = null
+  const file = input.files?.[0] ?? null
+  if (file && (!/\.json$/i.test(file.name) || !file.size || file.size > 2 * 1024 * 1024)) {
+    error.value = '请选择非空个人备份 JSON 文件，最大 2 MiB；整库 SQLite 备份不能用于个人恢复'; input.value = ''; return
+  }
+  error.value = ''; personalFile.value = file
+}
+async function exportPersonalBackup() {
+  if (!user.value || !personalExportPassword.value) return
+  await run(async () => {
+    try {
+      const blob = await api<Blob>('/account/backup/export', 'POST', { password: personalExportPassword.value }, 'download')
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a'); link.href = url; link.download = 'words-personal-backup.json'
+      document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000)
+      notice.value = '个人备份已下载，含全部词库、历史和进度，不含用户名或密码。请妥善保管。'
+    } finally { personalExportPassword.value = '' }
+  })
+}
+async function restorePersonalBackup() {
+  if (busy.value || !canRestorePersonal.value) return
+  if (!confirm('确认覆盖我的学习数据？当前用户全部词库、学习历史和进度将被备份替换，不会合并，当前学习将结束。不影响其他用户，不修改任何账户名或密码。网页无法撤销，仅主机 backups/ 下自动备份可回退。')) return
+  await run(async () => {
+    try {
+      const file = personalFile.value!
+      const currentPassword = personalPassword.value
+      const text = await file.text()
+      if (!canRestorePersonal.value || personalFile.value !== file || personalPassword.value !== currentPassword) throw new Error('恢复确认或文件已变化，请重新确认')
+      let backup: unknown
+      try { backup = JSON.parse(text) } catch { throw new Error('个人备份不是有效 JSON 文件') }
+      if (!backup || typeof backup !== 'object' || Array.isArray(backup) || !('format' in backup) || backup.format !== 'remember_words_user' || !('version' in backup) || backup.version !== 1) throw new Error('个人备份必须为 remember_words_user version 1；不能使用整库备份')
+      const payload = { password: personalPassword.value, confirmation: 'OVERWRITE_MY_DATA', backup }
+      if (new TextEncoder().encode(JSON.stringify(payload)).byteLength > 2 * 1024 * 1024) throw new Error('个人恢复请求不能超过 2 MiB（包括密码和确认信息）')
+      const result = await api<{ backup: string }>('/account/backup/restore', 'POST', payload)
+      clearAudio(); session.value = null; item.value = null; detail.value = null; content.value = null; summary.value = null; wordDraft.value = null; history.value = null
+      password.value = ''; childPassword.value = ''; resetPasswords.value = {}; clearDatabaseForm(); clearPersonalForm()
+      clearSheets(); importText.value = ''; driveUrl.value = ''; targetUser.value = ''; decks.value = []; due.value = 0; page.value = 'decks'
+      notice.value = `个人学习数据已覆盖恢复。账户名和密码未改变。主机自动备份文件：${result.backup}（backups/）。`
+      // 恢复已成功；刷新失败不能诱导用户再次覆盖。
+      try { await refresh() } catch { error.value = '个人数据已恢复，但词库刷新失败，请重新加载页面；不要重复恢复。' }
+    } catch (cause) {
+      if (cause instanceof TypeError) throw new Error('个人恢复请求连接中断，结果未知；请重新加载页面核实，不要直接重试覆盖恢复。')
+      throw cause
+    } finally { personalPassword.value = '' }
+  })
+}
+
+async function api<T>(path: string, method = 'GET', body?: unknown, mode?: 'raw' | 'download', headers: Record<string, string> = {}): Promise<T> {
   const response = await fetch(`/api${path}`, {
     method, credentials: 'same-origin',
-    headers: { ...(body === undefined ? {} : { 'Content-Type': mode === 'raw' ? 'application/octet-stream' : 'application/json' }), ...(method === 'GET' ? {} : { 'X-CSRF-Token': csrf }) },
+    headers: { ...(body === undefined ? {} : { 'Content-Type': mode === 'raw' ? 'application/octet-stream' : 'application/json' }), ...(method === 'GET' ? {} : { 'X-CSRF-Token': csrf }), ...headers },
     body: body === undefined ? undefined : mode === 'raw' ? body as Blob : JSON.stringify(body),
   })
   if (response.ok && mode === 'download') return await response.blob() as T
@@ -335,7 +452,7 @@ onMounted(async () => {
       <section v-else class="panel"><p>学习内容暂未载入。</p><button class="primary" :disabled="busy" @click="run(loadNext)">重新加载</button></section>
     </main>
     <main v-else class="dashboard">
-      <nav class="tabs" aria-label="主要导航"><button :class="{ active: page === 'decks' }" @click="page = 'decks'">我的词库</button><button :class="{ active: page === 'import' }" @click="page = 'import'">导入词库</button><button v-if="isParent" :class="{ active: page === 'family' }" @click="page = 'family'">家庭管理</button></nav>
+      <nav class="tabs" aria-label="主要导航"><button :class="{ active: page === 'decks' }" @click="page = 'decks'">我的词库</button><button :class="{ active: page === 'import' }" @click="page = 'import'">导入词库</button><button :disabled="busy" :class="{ active: page === 'backup' }" @click="page = 'backup'">个人备份</button><button v-if="isParent" :class="{ active: page === 'family' }" @click="page = 'family'">家庭管理</button></nav>
       <template v-if="page === 'decks'">
         <section class="welcome"><div><p class="eyebrow">把今天的一点，变成明天的更多</p><h1>你好，{{ user.username }}。</h1><p class="muted">不必一次记住所有，只要每天向前一点。</p><p class="fine">每人同时进行一个学习批次；开始任意词库会优先恢复未完成的批次。</p></div><div class="today-date">{{ new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' }) }}</div></section>
         <section class="review-banner"><div><span class="eyebrow">今日复习</span><h2>{{ due ? `${due} 个单词，等你再见一面` : '今天的复习，已安排妥当' }}</h2><p>{{ due ? '趁记忆还在，给它一点巩固。' : '暂时没有到期单词，挑一个词库开始学习吧。' }}</p></div><button :disabled="busy || !due" @click="start()">开始复习 <span>→</span></button></section>
@@ -343,6 +460,19 @@ onMounted(async () => {
         <div v-if="decks.length" class="deck-grid"><article v-for="(deck, index) in decks" :key="deck.id" class="panel deck-card"><span class="deck-icon" :class="`tone-${index % 3}`">{{ deck.name?.slice(0, 1) || '词' }}</span><h3>{{ deck.name || '未命名词库' }}</h3><p class="muted">{{ deck.total }} 个单词 <span class="dot">·</span> 已掌握 {{ deck.learned ?? 0 }} 个 <span class="dot">·</span> {{ deck.due }} 个待复习</p><button class="secondary" :disabled="busy" @click="openDeck(deck.id)">管理词库</button><div class="deck-footer"><span class="fine">{{ deck.started_at ? '已开始学习' : '等待初次相遇' }}</span><button class="text-button" :disabled="busy || !deck.total" @click="start(deck)">{{ deck.started_at ? '继续学习' : '开始学习' }} →</button></div></article></div>
         <section v-else class="panel empty"><h3>第一本词库，从这里开始</h3><p class="muted">导入一份 JSON 单词表，开启你的记忆旅程。</p><button class="primary" @click="page = 'import'">导入词库</button></section>
       </template>
+      <section v-else-if="page === 'backup'" class="panel database-panel" aria-labelledby="personal-heading">
+        <h1 id="personal-heading">个人备份</h1><p>所有用户均可备份自己的全部词库、学习历史和进度；不包含用户名或密码。个人 JSON 备份与整库 SQLite 备份不兼容。</p>
+        <form @submit.prevent="exportPersonalBackup"><fieldset :disabled="busy" class="database-fields"><legend>下载个人备份</legend><label>再次输入当前密码<input v-model="personalExportPassword" type="password" autocomplete="current-password" required /></label><button class="secondary" :disabled="busy || !personalExportPassword">下载个人 JSON 备份</button></fieldset></form>
+        <div class="database-warning" role="alert"><strong>危险：覆盖我的全部学习数据，不是合并！</strong><p>当前用户的全部词库、学习历史和进度会被备份替换，当前学习将结束。不影响其他用户，不修改任何账户名或密码。</p><p>网页无法撤销；仅主机 backups/ 下的恢复前自动备份可回退。个人恢复不会退出登录。</p></div>
+        <form @submit.prevent="restorePersonalBackup"><fieldset :disabled="busy" class="database-fields"><legend>覆盖恢复个人学习数据</legend>
+          <label>选择个人 JSON 备份（请求总大小最大 2 MiB）<input ref="personalInput" type="file" accept=".json,application/json" required @change="selectPersonalFile" /></label>
+          <p v-if="personalFile" class="fine">已选择：{{ personalFile.name }}</p>
+          <label class="risk-check"><input v-model="personalUnderstood" type="checkbox" />我已理解覆盖不可撤销，以及仅主机自动备份可回退</label>
+          <label>输入精确文字：确认覆盖我的学习数据<input v-model="personalConfirmation" autocomplete="off" :spellcheck="false" required /></label>
+          <label>当前密码<input v-model="personalPassword" type="password" autocomplete="current-password" required /></label>
+          <button class="danger restore-button" :disabled="busy || !canRestorePersonal">{{ busy ? '操作进行中…' : '覆盖我的全部学习数据' }}</button>
+        </fieldset></form>
+      </section>
       <section v-else-if="page === 'import'" class="panel import-panel">
         <p class="eyebrow">准备好你的单词</p><h1>导入词库</h1><p class="muted">先解析，再逐行检查预览，最后确认导入。重复单词（同义也算）须逐组选择。</p>
         <div class="form-grid"><label>词库名称（可选）<input v-model="deckName" maxlength="100" :disabled="busy" /></label><label v-if="isParent">导入给谁<select v-model="targetUser" :disabled="busy"><option value="">我自己</option><option v-for="child in users.filter(u => u.id !== user?.id && u.is_active !== false && u.is_active !== 0)" :key="child.id" :value="String(child.id)">{{ child.username }}</option></select></label></div>
@@ -370,7 +500,22 @@ onMounted(async () => {
         <section v-if="history" class="history-panel" aria-label="学习历史"><h2>{{ historyWord }} · 真实学习记录</h2><p>当前阶段：{{ history.stage }} · 下次复习：{{ dateTime(history.due_at) }}</p><ol class="stage-track"><li v-for="(interval, i) in history.intervals" :key="i" :class="{ current: i === history.stage }">阶段 {{ i }}<br>{{ intervalLabel(interval) }}</li></ol><p class="fine">阶段只表示复习间隔，不代表记忆概率；以下为真实答题时间线。</p><ol class="attempt-timeline"><li v-for="(attempt, i) in history.attempts" :key="i" :class="attempt.correct ? 'correct' : 'incorrect'"><strong>{{ attempt.correct ? '答对' : '答错' }}</strong> · {{ dateTime(attempt.created_at) }} · 第 {{ attempt.round_number }} 轮 · 输入：{{ attempt.answer || '（未输入）' }}</li></ol><p v-if="!history.attempts.length">暂无答题历史。</p><button class="text-button" @click="history = null">收起历史</button></section>
         <div v-if="detail.words.length" class="table-scroll"><table><caption>共 {{ detail.words.length }} 个词条</caption><thead><tr><th>英文</th><th>释义</th><th>例句 / 译文</th><th>学习进度</th><th>操作</th></tr></thead><tbody><tr v-for="word in detail.words" :key="word.id"><td>{{ word.word }}</td><td>{{ word.meaning }}</td><td>{{ word.example }}<br>{{ word.example_translation }}</td><td>阶段 {{ word.stage }}<br>答对 {{ word.correct }} / {{ word.attempts }}<br>下次：{{ dateTime(word.due_at) }}<br>最近：{{ dateTime(word.last_answer_at) }}</td><td><div class="word-tools"><button class="text-button" :disabled="busy" @click="wordDraft = { ...word }">编辑</button><button class="text-button" :disabled="busy" @click="showHistory(word)">历史趋势</button><button class="text-button danger" :disabled="busy" @click="changeWord(word, true)">重置进度</button><button class="text-button danger" :disabled="busy" @click="changeWord(word, false)">删除</button></div></td></tr></tbody></table></div><p v-else>词库为空。仍可改名、导出或删除。</p>
       </section>
-      <template v-else-if="page === 'family' && isParent"><div class="section-heading"><div><p class="eyebrow">陪伴成长</p><h1>家庭管理</h1></div></div><section class="panel"><h2>创建孩子账号</h2><form class="child-form" @submit.prevent="createChild"><label>用户名<input v-model="childName" autocomplete="off" required maxlength="150" placeholder="孩子的用户名" /></label><label>初始密码<input v-model="childPassword" autocomplete="new-password" type="password" required placeholder="设置初始密码" /></label><button class="primary" :disabled="busy">创建账号</button></form></section><section class="panel family-list"><h2>孩子与账号</h2><p class="fine">重置密码后，请将新密码告知孩子。停用不会删除学习记录。</p><div v-for="child in users.filter(u => u.id !== user?.id)" :key="child.id" class="child-row"><div class="child-info"><strong>{{ child.username }}</strong><span :class="['badge', { inactive: (child.is_active === false || child.is_active === 0) }]">{{ (child.is_active === false || child.is_active === 0) ? '已停用' : '正常' }}</span></div><form class="reset-form" @submit.prevent="updateChild(child, true)"><label class="sr-only" :for="`password-${child.id}`">{{ child.username }} 的新密码</label><input :id="`password-${child.id}`" v-model="resetPasswords[child.id]" type="password" autocomplete="new-password" required placeholder="输入新密码" /><button class="secondary" :disabled="busy">重置密码</button></form><button class="text-button" :class="{ danger: child.is_active !== false && child.is_active !== 0 }" :disabled="busy" @click="updateChild(child, false)">{{ (child.is_active === false || child.is_active === 0) ? '启用账号' : '停用账号' }}</button></div><p v-if="!users.some(u => u.id !== user?.id)" class="muted">还没有孩子账号，在上方创建第一个。</p></section></template>
+      <template v-else-if="page === 'family' && isParent"><div class="section-heading"><div><p class="eyebrow">陪伴成长</p><h1>家庭管理</h1></div></div><section class="panel"><h2>创建孩子账号</h2><form class="child-form" @submit.prevent="createChild"><label>用户名<input v-model="childName" :disabled="busy" autocomplete="off" required maxlength="150" placeholder="孩子的用户名" /></label><label>初始密码<input v-model="childPassword" :disabled="busy" autocomplete="new-password" type="password" required placeholder="设置初始密码" /></label><button class="primary" :disabled="busy">创建账号</button></form></section><section class="panel family-list"><h2>孩子与账号</h2><p class="fine">重置密码后，请将新密码告知孩子。停用不会删除学习记录。</p><div v-for="child in users.filter(u => u.id !== user?.id)" :key="child.id" class="child-row"><div class="child-info"><strong>{{ child.username }}</strong><span :class="['badge', { inactive: (child.is_active === false || child.is_active === 0) }]">{{ (child.is_active === false || child.is_active === 0) ? '已停用' : '正常' }}</span></div><form class="reset-form" @submit.prevent="updateChild(child, true)"><label class="sr-only" :for="`password-${child.id}`">{{ child.username }} 的新密码</label><input :id="`password-${child.id}`" v-model="resetPasswords[child.id]" :disabled="busy" type="password" autocomplete="new-password" required placeholder="输入新密码" /><button class="secondary" :disabled="busy">重置密码</button></form><button class="text-button" :class="{ danger: child.is_active !== false && child.is_active !== 0 }" :disabled="busy" @click="updateChild(child, false)">{{ (child.is_active === false || child.is_active === 0) ? '启用账号' : '停用账号' }}</button></div><p v-if="!users.some(u => u.id !== user?.id)" class="muted">还没有孩子账号，在上方创建第一个。</p></section>
+        <section class="panel database-panel" aria-labelledby="database-heading">
+          <h2 id="database-heading">整个数据库备份与覆盖恢复</h2>
+          <p>备份包含所有账户、词库、学习记录及密码哈希等敏感数据。请妥善保管，不要分享。</p>
+          <form @submit.prevent="exportDatabase"><fieldset :disabled="busy" class="database-fields"><legend>下载整个数据库</legend><label>再次输入当前管理员密码<input v-model="exportPassword" type="password" autocomplete="current-password" required /></label><button class="secondary" :disabled="busy || !exportPassword">下载 SQLite 备份</button></fieldset></form>
+          <div class="database-warning" role="alert"><strong>危险：覆盖整个数据库，不是合并！</strong><p>当前所有账户、词库、学习记录都会被备份内容替换，不会合并。所有人都会退出登录，恢复后必须使用备份内家长账号和密码登录。</p><p>网页无法撤销此操作；仅主机上的恢复前自动备份可用于回退。</p></div>
+          <form @submit.prevent="restoreDatabase"><fieldset :disabled="busy" class="database-fields"><legend>覆盖恢复整个数据库</legend>
+            <label>选择 SQLite 备份（.sqlite3 / .db，最大 50 MiB）<input ref="restoreInput" type="file" accept=".sqlite3,.db" required @change="selectRestoreFile" /></label>
+            <p v-if="restoreFile" class="fine">已选择：{{ restoreFile.name }}</p>
+            <label class="risk-check"><input v-model="restoreUnderstood" type="checkbox" />我已理解覆盖不可撤销的风险，以及仅主机自动备份可回退</label>
+            <label>输入精确文字：确认覆盖整个数据库<input v-model="restoreConfirmation" autocomplete="off" :spellcheck="false" required /></label>
+            <label>当前管理员密码（不是备份内密码）<input v-model="restorePassword" type="password" autocomplete="current-password" required /></label>
+            <button class="danger restore-button" :disabled="busy || !canRestore">{{ busy ? '操作进行中…' : '覆盖整个数据库并退出所有登录' }}</button>
+          </fieldset></form>
+        </section>
+      </template>
       <footer>一点一点，把单词记在心间。</footer>
     </main>
   </template>

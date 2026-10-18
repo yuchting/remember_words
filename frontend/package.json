@@ -7,7 +7,7 @@
     "dev": "vite --host 0.0.0.0",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview --host 0.0.0.0",
-    "test": "node --experimental-strip-types src/utils.test.ts && node src/import.test.mjs"
+    "test": "node --experimental-strip-types src/utils.test.ts && node src/import.test.mjs && node src/database.test.mjs"
   },
   "dependencies": { "vue": "^3.5.22" },
   "devDependencies": {
