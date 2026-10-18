@@ -180,7 +180,7 @@ class ImportData(InputModel):
     name: str | None = Field(default=None, max_length=100)
 
 
-def validate_words(items):
+def validate_words(items, reject_duplicates=False):
     result, seen = [], {}
     for index, item in enumerate(items, 1):
         if not isinstance(item, dict):
@@ -195,6 +195,8 @@ def validate_words(items):
             raise HTTPException(422, f'第 {index} 项缺少 word 或 meaning')
         key = normalize(clean['word'])
         if key in seen:
+            if reject_duplicates:
+                raise HTTPException(422, f'重复单词尚未处理：{clean["word"]}，请在预览中选择保留项')
             if seen[key] != clean['meaning']:
                 raise HTTPException(422, f'第 {index} 项同词不同释义，请先合并释义：{clean["word"]}')
             continue
@@ -208,7 +210,7 @@ def import_deck(data: ImportData, account=Depends(user)):
     target = data.user_id if data.user_id is not None else account['id']
     if target != account['id'] and account['role'] != 'parent':
         raise HTTPException(403, '不能为其他账户导入')
-    words = validate_words(data.items)
+    words = validate_words(data.items, reject_duplicates=True)
     with connect() as db:
         if not db.execute('SELECT id FROM users WHERE id=? AND is_active=1', (target,)).fetchone():
             raise HTTPException(404, '目标账户不可用')
@@ -226,7 +228,7 @@ def decks(account=Depends(user)):
         return [dict(r) for r in db.execute('''SELECT d.*,count(w.id) total,
             sum(CASE WHEN w.due_at<=? THEN 1 ELSE 0 END) due,
             sum(CASE WHEN w.stage>=0 THEN 1 ELSE 0 END) learned
-            FROM decks d JOIN words w ON w.deck_id=d.id WHERE d.user_id=? GROUP BY d.id ORDER BY d.id DESC''',
+            FROM decks d LEFT JOIN words w ON w.deck_id=d.id WHERE d.user_id=? GROUP BY d.id ORDER BY d.id DESC''',
             (time.time(), account['id']))]
 
 
@@ -279,6 +281,8 @@ def owned_session(db, sid, account):
     session = db.execute('SELECT * FROM study_sessions WHERE id=? AND user_id=?', (sid, account['id'])).fetchone()
     if not session:
         raise HTTPException(404, '学习批次不存在')
+    if session['status'] == 'cancelled':
+        raise HTTPException(409, '词库已修改，该批次已结束，请返回词库重新开始')
     return session
 
 
@@ -337,20 +341,40 @@ def answer(sid: int, iid: int, data: Answer, account=Depends(user)):
 
 
 class ExamplePatch(InputModel):
-    example: str = Field(min_length=1, max_length=2000)
-    example_translation: str = Field(min_length=1, max_length=2000)
+    meaning: str | None = Field(default=None, min_length=1, max_length=1000)
+    example: str | None = Field(default=None, max_length=2000)
+    example_translation: str | None = Field(default=None, max_length=2000)
+
+
+def owned_word(db, wid, account):
+    row = db.execute('SELECT w.* FROM words w JOIN decks d ON d.id=w.deck_id WHERE w.id=? AND d.user_id=?',
+                     (wid, account['id'])).fetchone()
+    if not row:
+        raise HTTPException(404, '词条不存在')
+    return row
+
+
+def cancel_word_sessions(db, word_ids):
+    for wid in word_ids:
+        db.execute('''UPDATE study_sessions SET status='cancelled' WHERE status='active' AND id IN
+            (SELECT session_id FROM study_items WHERE word_id=?)''', (wid,))
 
 
 @app.patch('/api/words/{wid}')
 def update_example(wid: int, data: ExamplePatch, account=Depends(user)):
+    fields = data.model_dump(exclude_unset=True)
+    if not fields or any(value is None for value in fields.values()):
+        raise HTTPException(422, '请提供要修改的字段，不允许 null')
+    fields = {key: unicodedata.normalize('NFC', value).strip() for key, value in fields.items()}
+    if 'meaning' in fields and not fields['meaning']:
+        raise HTTPException(422, '释义不能为空')
     with connect() as db:
-        row = db.execute('SELECT d.user_id FROM words w JOIN decks d ON d.id=w.deck_id WHERE w.id=?', (wid,)).fetchone()
-        if not row or (row['user_id'] != account['id'] and account['role'] != 'parent'):
-            raise HTTPException(404, '词条不存在')
-        if not data.example.strip() or not data.example_translation.strip():
-            raise HTTPException(422, '例句和译文不能为空')
-        db.execute('UPDATE words SET example=?,example_translation=? WHERE id=?',
-                   (data.example.strip(), data.example_translation.strip(), wid))
+        db.execute('BEGIN IMMEDIATE')
+        owned_word(db, wid, account)
+        if 'meaning' in fields:
+            cancel_word_sessions(db, [wid])
+        db.execute('UPDATE words SET ' + ','.join(key + '=?' for key in fields) + ' WHERE id=?',
+                   (*fields.values(), wid))
     return {'ok': True}
 
 
@@ -429,6 +453,48 @@ async def enrich(wid: int, account=Depends(user)):
                    (audio, phonetic, example, wid))
         updated = db.execute('SELECT *,id word_id FROM words WHERE id=?', (wid,)).fetchone()
         return content(updated) | {'definitions': definitions_text, 'source': 'Free Dictionary API', 'notice': '中文译文需导入或手工补充；发音可用性取决于音频和设备英语语音包'}
+
+
+from .management import register as register_management
+register_management(app, user, owned_word, cancel_word_sessions)
+
+
+class PreviewData(InputModel):
+    items: list = Field(min_length=1, max_length=5000)
+
+
+@app.post('/api/import/preview')
+def preview(data: PreviewData, account=Depends(user)):
+    items = []
+    for index, item in enumerate(data.items, 1):
+        try:
+            items.append(validate_words([item])[0])
+        except HTTPException as exc:
+            raise HTTPException(422, f'第 {index} 行：{exc.detail}') from None
+    groups = {}
+    for index, item in enumerate(items):
+        groups.setdefault(normalize(item['word']), []).append(index)
+    return {'items': items, 'duplicates': [
+        {'word': items[indices[0]]['word'], 'indices': indices}
+        for indices in groups.values() if len(indices) > 1
+    ]}
+
+
+@app.post('/api/import/xlsx')
+async def preview_xlsx(request: Request, account=Depends(user)):
+    from .import_sources import parse_xlsx
+    return parse_xlsx(await request.body())
+
+
+class DriveData(InputModel):
+    url: str = Field(min_length=1, max_length=2048)
+
+
+@app.post('/api/import/drive')
+async def preview_drive(data: DriveData, account=Depends(user)):
+    from .import_sources import parse_xlsx, read_drive
+    body = await read_drive(data.url, allow_private=account['role'] == 'parent')
+    return parse_xlsx(body)
 
 
 @app.get('/api/health')

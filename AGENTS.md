@@ -9,7 +9,7 @@
 - `backend/app/main.py`：API、会话/权限、JSON 导入、词典、静态服务。
 - `backend/app/db.py`：schema、事务连接、数据库路径；`study.py`：判分、轮次、调度；`cli.py`：创建家长、在线备份。
 - `frontend/src/App.vue`：页面和交互；`style.css`：样式；`utils.ts`：导入解析、错误展示。
-- `sop.sh start|stop|status|restart`：环境检查、依赖安装、构建、后台进程管理。默认本机 `127.0.0.1:8000`，日志 `.run/server.log`；不自动加载 `.env`。
+- `sop.sh start|stop|status|restart`：环境检查、依赖安装、构建、后台进程管理。默认全部 IPv4 网卡 `0.0.0.0:18765`，自动探测本机 IP 配置 Host 校验，日志 `.run/server.log`；不自动加载 `.env`。
 - 配置：`HOST`、`PORT`（脚本）；`WORDS_DB`、`WORDS_HOSTS`、`WORDS_HTTPS`（后端）；脚本 TLS 另需 `TLS_CERT`、`TLS_KEY`。
 
 ## 不可破坏的规则
@@ -19,7 +19,7 @@
 - 答案仅做 NFC、strip、casefold；不放宽拼写、内部空格和标点。
 - 间隔：10 分钟、1/3/7/14/30 天；失败重新过关回到 10 分钟，最后阶段保持 30 天。同一批次每词最多升级一次。
 - 每用户最多一个活动批次；队列落库，刷新可恢复；答题记录、调度和轮次推进同一事务。`attempts.item_id` 唯一，重复提交不重复推进。
-- JSON：`word`、`meaning` 必填；`id` 不作主键；可选 `example`、`example_translation`。同词同义合并，同词异义拒绝并提示合并。请求 ≤2 MiB，每库 ≤5000 条；导入全成或全败。
+- JSON：`word`、`meaning` 必填；`id` 不作主键；可选 `example`、`example_translation`。导入必须先预览，重复词逐组选择；最终接口拒绝任何未处理重复。支持 XLSX 首行 `word`/`words`、`meaning`，逐页扫描，无效页报告原因，有效页多选合并预览并跨页去重；公开 Drive 优先，私有回退仅家长且 `WORDS_GOG_PRIVATE=1`，使用已授权 `gog`。请求 ≤2 MiB，每库 ≤5000 条；导入全成或全败。
 - 时间存 UTC epoch，页面本地显示；当前词库默认以导入时间命名，开始时间另存。
 
 ## 安全与数据
@@ -36,7 +36,7 @@
 沿用现有小文件结构，标准库优先，不加无需求的分层或依赖。改 API 同步前端类型；改依赖同步锁文件。路径使用 pathlib，输出路径用 `/`。不擅自提交 Git 或覆盖用户数据。
 
 ```sh
-.venv/bin/python -m unittest backend.tests.check_core -v
+.venv/bin/python -m unittest backend.tests.check_core backend.tests.check_management backend.tests.check_sources -v
 npm --prefix frontend test
 npm --prefix frontend run build
 bash -n sop.sh

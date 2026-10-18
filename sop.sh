@@ -7,8 +7,8 @@ RUN="$ROOT/.run"
 PID_FILE="$RUN/server.pid"
 LOG="$RUN/server.log"
 PY="$ROOT/.venv/bin/python"
-HOST="${HOST:-127.0.0.1}"
-PORT="${PORT:-8000}"
+HOST="${HOST:-0.0.0.0}"
+PORT="${PORT:-18765}"
 ACTION="${1:-start}"
 export PYTHONUNBUFFERED=1
 
@@ -21,7 +21,7 @@ help() {
   stop     优雅停止本脚本启动的服务
   status   查看进程状态
   环境检查在 start、restart 时自动执行；日志位于 .run/server.log。
-环境变量：PYTHON=python3 HOST=127.0.0.1 PORT=8000
+环境变量：PYTHON=python3 HOST=0.0.0.0 PORT=18765
 局域网：HOST=0.0.0.0 WORDS_HOSTS=localhost,127.0.0.1,主机IP ./sop.sh
 TLS：WORDS_HTTPS=1 TLS_CERT=/证书路径 TLS_KEY=/私钥路径
 不会自动执行 .env 文件。数据库配置沿用 WORDS_DB。
@@ -99,6 +99,26 @@ prepare() {
         echo "$node_hash" > "$RUN/node.hash"
     fi
     npm --prefix frontend run build
+    if [[ -z "${WORDS_HOSTS:-}" ]]; then
+        WORDS_HOSTS="$("$PY" - <<'PY'
+import socket
+hosts = {'localhost', '127.0.0.1'}
+try:
+    hosts.update(item[4][0] for item in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET))
+except OSError:
+    pass
+try:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as connection:
+        connection.connect(('192.0.2.1', 80))
+        hosts.add(connection.getsockname()[0])
+except OSError:
+    pass
+print(','.join(sorted(hosts)))
+PY
+)"
+        export WORDS_HOSTS
+    fi
+    echo "允许的访问地址：$WORDS_HOSTS"
     local parents
     parents="$("$PY" -c 'from backend.app.db import initialize,connect; initialize(); c=connect(); db=c.__enter__(); print(db.execute("SELECT count(*) FROM users WHERE role=? AND is_active=1",("parent",)).fetchone()[0]); c.__exit__(None,None,None)')"
     if [[ "$parents" == 0 ]]; then

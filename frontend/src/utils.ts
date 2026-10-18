@@ -10,6 +10,15 @@ export function errorMessage(detail: unknown): string {
   return '请求失败，请稍后重试'
 }
 
+export function reviewComplete(groups: { indices: number[] }[], included: boolean[], choices: Record<number, string>): boolean {
+  return groups.every((group, i) => {
+    const choice = choices[i]
+    const selected = group.indices.filter(index => included[index])
+    return choice === 'none' ? selected.length === 0
+      : choice !== undefined && selected.length === 1 && String(selected[0]) === choice
+  })
+}
+
 export function parseImport(text: string): Record<string, unknown>[] {
   const value: unknown = JSON.parse(text)
   if (!Array.isArray(value) || !value.length) throw new Error('JSON 必须是非空单词数组')

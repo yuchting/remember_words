@@ -84,7 +84,11 @@ Vite 代理 `/api` 到后端。修改后端监听环境或构建前端后，重�
 ]
 ```
 
-同词同义会合并；同词异义需先合并释义，否则拒绝导入。上传限制 2 MiB、5000 条；接口整体请求也限制 2 MiB，接近上限时需预留 JSON 包装空间。
+JSON、XLSX 和 Google Drive 导入均先预览，再由用户确认。重复单词按 NFC、首尾空格与大小写归组，用户选择保留项或全部排除，最终提交不得含重复词。不同词库允许同词，记忆进度独立。
+
+XLSX 只支持 `.xlsx`，第一行必须有 `word`（兼容 `words`）、`meaning`；`id` 可选且忽略，可选例句列 `example`、`example_translation`。扫描全部工作表，有效页可多选，选中页合并为一个词库进行预览与跨页去重；空表、说明页、缺列页或内容错误页跳过并列出原因，不阻塞其他有效页。全部页面均不可用时才报错。上传限制 2 MiB、每表 5000 条；接口整体请求也限制 2 MiB，接近上限时需预留 JSON 包装空间。ZIP 展开限制 20 MiB，拒绝 XML DTD 与实体。
+
+Drive 支持 Google Sheets 分享链接、Drive `/file/d/ID` 和 `/open?id=ID`。先尝试公开 XLSX 下载；公开访问失败才回退私有读取，格式错误和缺少列不会触发私有读取。私有回退需要家长登录，并在启动服务前设置 `WORDS_GOG_PRIVATE=1`，服务器已安装并授权 `gog`。实际命令为 `gog drive download ID --no-input --out PATH`；Sheets 另加 `--format=xlsx`。此授权可访问服务器 Google 账户文件，只应授权可信家长；不开放给孩子。未配置、无权限、超时或格式不对都向用户报错。程序不执行用户传入命令或任意下载 URL。
 
 首次学习覆盖整个词库；暂停后恢复活动批次。一个孩子同时只有一个活动批次，点击其他词库学习也会恢复该批次。已完成首轮的词只能在到期复习入口再次学习，避免重复刷新阶段。
 
@@ -99,7 +103,7 @@ Vite 代理 `/api` 到后端。修改后端监听环境或构建前端后，重�
 ## 自动检查
 
 ```sh
-.venv/bin/python -m unittest backend.tests.check_core -v
+.venv/bin/python -m unittest backend.tests.check_core backend.tests.check_management backend.tests.check_sources -v
 npm --prefix frontend test
 npm --prefix frontend run build
 ```
