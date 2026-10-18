@@ -19,7 +19,7 @@ unset WORDS_SKIP_SYSTEMD
 for action in start stop restart status; do
     bash "$ROOT/sop.sh" "$action"
 done
-printf '%s\n' 'start words.service' 'stop words.service' 'restart words.service' 'status words.service' > "$TEMP/expected"
+printf '%s\n' '--no-pager start words.service' '--no-pager stop words.service' '--no-pager restart words.service' '--no-pager status words.service' > "$TEMP/expected"
 cmp "$CALLS" "$TEMP/expected"
 if RESULT=3 bash "$ROOT/sop.sh" status; then
     echo 'Expected systemctl exit code 3' >&2
@@ -27,6 +27,13 @@ if RESULT=3 bash "$ROOT/sop.sh" status; then
 else
     [[ $? == 3 ]]
 fi
-bash -n "$ROOT/setup_service.sh"
+bash "$ROOT/sop.sh" > "$TEMP/help"
+grep -q 'service' "$TEMP/help"
+[[ ! -e "$ROOT/setup_service.sh" ]]
+if bash "$ROOT/sop.sh" service unexpected > "$TEMP/error" 2>&1; then
+    echo 'Expected extra service argument to fail' >&2
+    exit 1
+fi
+grep -q 'service 不支持额外参数' "$TEMP/error"
 bash -n "$ROOT/sop.sh"
 echo 'systemd delegation and exit status checks passed'

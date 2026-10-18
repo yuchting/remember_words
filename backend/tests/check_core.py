@@ -53,6 +53,64 @@ class CoreChecks(unittest.TestCase):
         self.assertEqual(self.post('/api/admin/users', {'username': 'x', 'password': 'password123'}).status_code, 403)
         self.assertEqual(self.client.post('/api/reviews/study').status_code, 403)
 
+    def test_round_interrupt_finish_report(self):
+        deck = self.make_deck()
+        sid = self.post(f'/api/decks/{deck}/study').json()['id']
+        item = self.client.get(f'/api/study/{sid}/next').json()['item']
+        word = 'hello' if item['meaning'] == '你好' else 'world'
+        self.post(f'/api/study/{sid}/items/{item["id"]}/answer', {'answer': word})
+        with connect() as db:
+            self.assertEqual([r[0] for r in db.execute('SELECT stage FROM words')], [-1, -1])
+        self.assertEqual(self.client.get(f'/api/study/{sid}/rounds/1').status_code, 409)
+        self.assertEqual(self.post(f'/api/study/{sid}/round-action', {'action': 'interrupt', 'round_number': 1}).status_code, 200)
+        restored = self.client.get(f'/api/study/{sid}/next').json()['item']
+        self.assertEqual((restored['id'], restored['answered']), (item['id'], 0))
+        self.post(f'/api/study/{sid}/items/{item["id"]}/answer', {'answer': word})
+        self.assertEqual(self.post(f'/api/study/{sid}/round-action', {'action': 'finish', 'round_number': 1}).status_code, 200)
+        report = self.client.get(f'/api/study/{sid}/rounds/1').json()
+        self.assertEqual((report['correct'], report['wrong'], report['unanswered']), (1, 0, 1))
+        self.assertEqual([w['next_round_probability'] for w in report['words']], [0, 100])
+        self.assertEqual(self.post(f'/api/study/{sid}/round-action', {'action': 'finish', 'round_number': 1}).status_code, 409)
+        next_item = self.client.get(f'/api/study/{sid}/next').json()['item']
+        self.assertEqual((next_item['round_number'], next_item['total']), (2, 1))
+        with connect() as db:
+            self.assertEqual(sorted(r[0] for r in db.execute('SELECT stage FROM words')), [-1, 0])
+        self.post(f'/api/study/{sid}/items/{next_item["id"]}/reveal')
+        self.post(f'/api/study/{sid}/round-action', {'action': 'interrupt', 'round_number': 2})
+        with connect() as db:
+            self.assertEqual(db.execute('SELECT hint_used FROM study_items WHERE id=?', (next_item['id'],)).fetchone()[0], 0)
+        self.login('bob')
+        self.assertEqual(self.client.get(f'/api/study/{sid}/rounds/1').status_code, 404)
+
+    def test_round_progress_survives_relogin(self):
+        deck = self.make_deck()
+        sid = self.post(f'/api/decks/{deck}/study').json()['id']
+        for number in (1, 2, 3):
+            active = self.client.get('/api/study/active').json()['session']
+            self.assertEqual((active['id'], active['round_number'], active['total'], active['answered']),
+                             (sid, number, 2 if number == 1 else 1, 0))
+            question = self.client.get(f'/api/study/{sid}/next').json()['item']
+            self.assertNotIn('word', question)
+            iid = question['id']
+            self.login('alice')
+            self.assertEqual(self.client.get(f'/api/study/{sid}/next').json()['item'], question)
+            self.assertEqual(self.post('/api/reviews/study').json()['id'], sid)
+            self.assertFalse(self.post(f'/api/study/{sid}/items/{iid}/answer', {'skip': True}).json()['correct'])
+            if number == 1:
+                progress = self.client.get('/api/study/active').json()['session']
+                self.assertEqual((progress['answered'], progress['remaining']), (1, 1))
+                second = self.client.get(f'/api/study/{sid}/next').json()['item']
+                word = 'hello' if second['meaning'] == '你好' else 'world'
+                self.post(f'/api/study/{sid}/items/{second["id"]}/answer', {'answer': word})
+        final = self.client.get(f'/api/study/{sid}/next').json()['item']
+        self.assertEqual((final['round_number'], final['total']), (4, 1))
+        word = 'hello' if final['meaning'] == '你好' else 'world'
+        self.post(f'/api/study/{sid}/items/{final["id"]}/answer', {'answer': word})
+        self.assertIsNone(self.client.get('/api/study/active').json()['session'])
+        self.login('bob')
+        self.assertIsNone(self.client.get('/api/study/active').json()['session'])
+        self.assertEqual(self.client.get(f'/api/study/{sid}/next').status_code, 404)
+
     def test_rounds_resume_hints_idempotency(self):
         deck = self.make_deck()
         sid = self.post(f'/api/decks/{deck}/study').json()['id']

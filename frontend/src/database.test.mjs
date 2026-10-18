@@ -144,6 +144,7 @@ fetch = async (url, options) => {
     assert.deepEqual(JSON.parse(options.body), { password: ' child 密码 ', confirmation: 'OVERWRITE_MY_DATA', backup: { format: 'remember_words_user', version: 1, decks: [] } })
     return Response.json({ backup: 'personal-before.json' })
   }
+  if (url === '/words/api/study/active') return Response.json({ session: null })
   if (url === '/words/api/decks') return Response.json([])
   if (url === '/words/api/reviews/due') return Response.json({ count: 0 })
   throw new Error(`意外请求 ${url}`)

@@ -1,3 +1,13 @@
+export function deckStatistics(words: { stage: number; due_at: number | null }[], now = Date.now() / 1000) {
+  const stages = Array.from({ length: 7 }, (_, index) => ({ stage: index - 1, count: 0 }))
+  for (const word of words) stages[word.stage + 1]!.count++
+  const total = words.length
+  const unlearned = stages[0]!.count
+  const passed = total - unlearned
+  return { total, passed, unlearned, percentage: total ? Math.round(passed / total * 1000) / 10 : 0,
+    due: words.filter(word => word.due_at !== null && word.due_at <= now).length, stages }
+}
+
 export function errorMessage(detail: unknown): string {
   if (typeof detail === 'string') return detail
   if (Array.isArray(detail)) return detail.map(errorMessage).join('；')

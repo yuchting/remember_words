@@ -1,5 +1,13 @@
 import assert from 'node:assert/strict'
-import { errorMessage, parseImport, reviewComplete } from './utils.ts'
+import { deckStatistics, errorMessage, parseImport, reviewComplete } from './utils.ts'
+
+const empty = deckStatistics([], 100)
+assert.equal(empty.percentage, 0)
+assert.equal(empty.total, 0)
+const stats = deckStatistics([{ stage: -1, due_at: null }, { stage: 0, due_at: 100 }, { stage: 5, due_at: 101 }], 100)
+assert.deepEqual([stats.total, stats.passed, stats.unlearned, stats.due, stats.percentage], [3, 2, 1, 1, 66.7])
+assert.deepEqual(stats.stages.map(stage => stage.count), [1, 1, 0, 0, 0, 0, 1])
+assert.equal(deckStatistics([{ stage: 0, due_at: 101 }], 100).percentage, 100)
 
 const groups = [{ indices: [0, 1] }, { indices: [2, 3] }]
 assert.equal(reviewComplete(groups, [false, false, false, false], {}), false)

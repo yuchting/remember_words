@@ -21,7 +21,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 
 from .db import ROOT, connect, initialize
-from .study import add_round, content, current_item, normalize, submit
+from .study import add_round, content, current_item, finish_round, normalize, submit
 
 hasher = PasswordHasher()
 DUMMY_HASH = hasher.hash(secrets.token_urlsafe(24))
@@ -312,6 +312,22 @@ def owned_session(db, sid, account):
     return session
 
 
+def round_progress(db: sqlite3.Connection, sid: int, number: int) -> dict:
+    row = db.execute('''SELECT count(*) total, count(a.id) answered,
+        coalesce(sum(a.correct),0) correct FROM study_items i
+        LEFT JOIN attempts a ON a.item_id=i.id
+        WHERE i.session_id=? AND i.round_number=?''', (sid, number)).fetchone()
+    return dict(row) | {'remaining': row['total'] - row['answered']}
+
+
+@app.get('/api/study/active')
+def active_study(account=Depends(user)):
+    with connect() as db:
+        session = db.execute("SELECT id,round_number,kind FROM study_sessions WHERE user_id=? AND status='active'",
+                             (account['id'],)).fetchone()
+        return {'session': dict(session) | round_progress(db, session['id'], session['round_number']) if session else None}
+
+
 @app.get('/api/study/{sid}/next')
 def next_question(sid: int, account=Depends(user)):
     with connect() as db:
@@ -321,10 +337,50 @@ def next_question(sid: int, account=Depends(user)):
             row = db.execute('''SELECT count(*) attempts,coalesce(sum(a.correct),0) correct FROM attempts a
                 JOIN study_items i ON i.id=a.item_id WHERE i.session_id=?''', (sid,)).fetchone()
             return {'complete': True, 'summary': dict(row)}
-        remaining = db.execute('''SELECT count(*) FROM study_items i LEFT JOIN attempts a ON a.item_id=i.id
-            WHERE i.session_id=? AND a.id IS NULL''', (sid,)).fetchone()[0]
         return {'complete': False, 'item': {'id': item['id'], 'meaning': item['meaning'],
-                'round_number': session['round_number'], 'remaining': remaining}}
+                'round_number': session['round_number'], **round_progress(db, sid, session['round_number'])}}
+
+
+@app.get('/api/study/{sid}/rounds/{number}')
+def round_report(sid: int, number: int, account=Depends(user)):
+    with connect() as db:
+        session = owned_session(db, sid, account)
+        if number < 1 or number > session['round_number'] or (session['status'] == 'active' and number == session['round_number']):
+            raise HTTPException(409, '本轮尚未结算')
+        rows = db.execute('''SELECT w.id word_id,w.word,w.meaning,w.stage,w.due_at,a.correct,
+            i.hint_used FROM study_items i JOIN words w ON w.id=i.word_id
+            LEFT JOIN attempts a ON a.item_id=i.id WHERE i.session_id=? AND i.round_number=?
+            ORDER BY i.position''', (sid, number)).fetchall()
+        words = [dict(row) | {'next_round_probability': 0 if row['correct'] == 1 else 100,
+                             'evaluation': '独立答对' if row['correct'] == 1 else ('未答，不计分' if row['correct'] is None else '未独立答对')}
+                 for row in rows]
+        return {'round_number': number, 'total': len(words),
+                'correct': sum(row['correct'] == 1 for row in rows),
+                'wrong': sum(row['correct'] == 0 for row in rows),
+                'unanswered': sum(row['correct'] is None for row in rows), 'words': words}
+
+
+class RoundAction(InputModel):
+    round_number: int = Field(ge=1)
+    action: str
+
+
+@app.post('/api/study/{sid}/round-action')
+def round_action(sid: int, data: RoundAction, account=Depends(user)):
+    if data.action not in ('interrupt', 'finish'):
+        raise HTTPException(422, '不支持的轮次操作')
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        session = owned_session(db, sid, account)
+        if session['status'] != 'active' or session['round_number'] != data.round_number:
+            raise HTTPException(409, '轮次已变化，请刷新')
+        if data.action == 'interrupt':
+            db.execute('''DELETE FROM attempts WHERE item_id IN
+                (SELECT id FROM study_items WHERE session_id=? AND round_number=?)''', (sid, data.round_number))
+            db.execute('UPDATE study_items SET hint_used=0 WHERE session_id=? AND round_number=?', (sid, data.round_number))
+        else:
+            finish_round(db, session, time.time())
+        return {'ok': True}
 
 
 class Answer(InputModel):
