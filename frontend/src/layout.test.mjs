@@ -14,11 +14,12 @@ try {
       value = { id: 1, role: 'parent', username: 'parent-layout-check', csrf_token: 'test' }
     }
     if (path.endsWith('/decks')) value = [{ id: 1, name: '小学英语单词与例句练习', total: 100, learned: 20, due: 10 }]
-    if (path.endsWith('/reviews/due')) value = { count: 10 }
-    if (path.endsWith('/study/active')) value = { session: null }
+    if (path.endsWith('/reviews/due')) value = { count: 10, decks: [{ deck_id: 1, count: 10 }] }
+    if (path.endsWith('/study/active')) value = { session: null, sessions: [] }
     if (path.endsWith('/admin/speech')) value = { primary: 'azure', fallback: 'google', browser_fallback: false, azure: { region: 'eastasia', voice: 'en-US-JennyNeural', key_set: true }, google: { voice: 'en-US-Neural2-F', key_set: false } }
     if (path.endsWith('/speech/cache')) value = { files: 1234, bytes: 5345280, max_bytes: 104857600 }
     if (path.endsWith('/speech/settings')) value = { enabled: false, browser_fallback: false }
+    if (path.endsWith('/statistics')) value = { totals: { total: 100, passed: 20, due: 10, stages: { '-1': 80, '0': 20 } }, decks: [{ id: 1, name: '小学英语', total: 100, passed: 20, due: 10 }], mistakes: [], first_round: { new: { attempts: 0, correct: 0, accuracy: null }, review: { attempts: 0, correct: 0, accuracy: null } }, daily: [], upcoming_due: [], new_passed_available: false, new_passed_note: '历史未记录过关时间' }
     if (path.endsWith('/study') && route.request().method() === 'POST') value = { id: 1 }
     if (path.endsWith('/next')) value = { complete: false, item: { id: 1, round_number: 1, answered: 0, total: 100, remaining: 100, meaning: '非常美好的；精彩的；令人赞叹的' } }
     if (path.endsWith('/reveal')) value = { word: 'wonderful', meaning: '非常美好的；精彩的；令人赞叹的', phonetic: '/ˈwʌndəfəl/', word_id: 1, example: 'We had a wonderful time learning English together.', example_translation: '我们一起学习英语，度过了美好的时光。' }
@@ -43,7 +44,7 @@ try {
     await page.reload()
     await page.getByRole('button', { name: '云端朗读', exact: true }).waitFor()
     await check('decks', width, height)
-    for (const [label, name] of [['云端朗读', 'speech'], ['导入词库', 'import'], ['个人备份', 'backup'], ['家庭管理', 'family']]) {
+    for (const [label, name] of [['总体统计', 'statistics'], ['云端朗读', 'speech'], ['导入词库', 'import'], ['个人备份', 'backup'], ['家庭管理', 'family']]) {
       await page.getByRole('button', { name: label, exact: true }).first().click()
       await check(name, width, height)
     }

@@ -1,12 +1,17 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch, onUnmounted } from 'vue'
 import { deckStatistics, errorMessage, parseImport, reviewComplete } from './utils'
+import StatisticsPanel from './StatisticsPanel.vue'
 
 type User = { id: number; username: string; role: string; is_active?: boolean | number }
 type Deck = { id: number; name: string; total: number; due: number; learned?: number; started_at?: string }
-type Progress = { id: number; round_number: number; total: number; answered: number; correct: number; remaining: number }
+type Progress = { id: number; round_number: number; total: number; answered: number; correct: number; remaining: number; deck_id?: number | null; deck_name?: string; kind?: string }
 type Item = Progress & { meaning: string; practice_pending?: boolean }
-const activeStudy = ref<Progress | null>(null)
+const activeStudies = ref<Progress[]>([])
+const reviewDeckIds = ref<number[]>([])
+const reviewCounts = ref<Record<number, number>>({})
+const selectedReviewCount = computed(() => reviewDeckIds.value.reduce((sum, id) => sum + (reviewCounts.value[id] ?? 0), 0))
+function deckProgress(id: number) { return activeStudies.value.find(progress => progress.deck_id === id) }
 type Content = { practice_pending?: boolean; practice?: boolean; spelling_correct?: boolean; word: string; meaning: string; example?: string; example_translation?: string; audio?: string; phonetic?: string; correct?: boolean; complete?: boolean; word_id?: number; definitions?: string[] }
 type Summary = { attempts: number; correct: number }
 type ImportWord = { word: string; meaning: string; example?: string; example_translation?: string }
@@ -287,8 +292,10 @@ async function run(action: () => Promise<void>) {
   }
 }
 async function refresh() {
-  const [list, review, active] = await Promise.all([api<Deck[]>('/decks'), api<{ count: number }>('/reviews/due'), api<{ session: Progress | null }>('/study/active')])
-  decks.value = list; due.value = review.count; activeStudy.value = active.session
+  const [list, review, active] = await Promise.all([api<Deck[]>('/decks'), api<{ count: number; decks: { deck_id: number; count: number; active_session: Progress | null }[] }>('/reviews/due'), api<{ sessions: Progress[] }>('/study/active')])
+  decks.value = list; due.value = review.count; activeStudies.value = active.sessions
+  reviewCounts.value = Object.fromEntries(review.decks.map(deck => [deck.deck_id, deck.count]))
+  reviewDeckIds.value = reviewDeckIds.value.filter(id => list.some(deck => deck.id === id))
   if (isParent.value) users.value = await api<User[]>('/admin/users')
 }
 async function login() {
@@ -505,25 +512,25 @@ async function loadNext() {
   if (data.complete) await refresh()
   await nextTick(); resetFluency()
 }
-async function showPreviousReport() {
-  if (!activeStudy.value || activeStudy.value.round_number < 2) return
+async function showPreviousReport(progress: Progress) {
+  if (progress.round_number < 2) return
   await run(async () => {
-    session.value = activeStudy.value!.id
-    report.value = await api<RoundReport>(`/study/${session.value}/rounds/${activeStudy.value!.round_number - 1}`)
+    session.value = progress.id
+    report.value = await api<RoundReport>(`/study/${session.value}/rounds/${progress.round_number - 1}`)
     pendingReport.value = null
   })
 }
-async function resumeStudy() {
-  if (!activeStudy.value) return
+async function resumeStudy(progress: Progress) {
   await run(async () => {
     report.value = null; pendingReport.value = null
-    session.value = activeStudy.value!.id; summary.value = null; item.value = null; content.value = null
+    session.value = progress.id; summary.value = null; item.value = null; content.value = null
     await loadNext()
   })
 }
 async function start(deck?: Deck) {
   await run(async () => {
-    const data = await api<{ id: number }>(deck ? `/decks/${deck.id}/study` : '/reviews/study', 'POST')
+    const data = await api<{ id: number }>(deck ? `/decks/${deck.id}/study` : '/reviews/study', 'POST', deck ? undefined : { deck_ids: reviewDeckIds.value })
+    await refresh()
     report.value = null; pendingReport.value = null
     session.value = data.id; summary.value = null; item.value = null; content.value = null; await loadNext()
   })
@@ -699,15 +706,17 @@ onMounted(async () => {
       <section v-else class="panel"><p>学习内容暂未载入。</p><button class="primary" :disabled="busy" @click="run(loadNext)">重新加载</button></section>
     </main>
     <main v-else class="dashboard">
-      <nav class="tabs" aria-label="主要导航"><button :class="{ active: page === 'decks' }" @click="page = 'decks'">我的词库</button><button :class="{ active: page === 'import' }" @click="page = 'import'">导入词库</button><button :disabled="busy" :class="{ active: page === 'backup' }" @click="page = 'backup'">个人备份</button><button v-if="isParent" :class="{ active: page === 'family' }" @click="page = 'family'">家庭管理</button><button v-if="isParent" :disabled="busy" :class="{ active: page === 'speech' }" @click="openSpeech">云端朗读</button></nav>
+      <nav class="tabs" aria-label="主要导航"><button :class="{ active: page === 'decks' }" @click="page = 'decks'">我的词库</button><button :class="{ active: page === 'overall-statistics' }" @click="page = 'overall-statistics'">总体统计</button><button :class="{ active: page === 'import' }" @click="page = 'import'">导入词库</button><button :disabled="busy" :class="{ active: page === 'backup' }" @click="page = 'backup'">个人备份</button><button v-if="isParent" :class="{ active: page === 'family' }" @click="page = 'family'">家庭管理</button><button v-if="isParent" :disabled="busy" :class="{ active: page === 'speech' }" @click="openSpeech">云端朗读</button></nav>
       <template v-if="page === 'decks'">
-        <section v-if="activeStudy" class="panel" aria-label="已保存的学习进度"><h2>继续第 {{ activeStudy.round_number }} 轮</h2><p>本轮已完成 {{ activeStudy.answered }}/{{ activeStudy.total }} 词，剩余 {{ activeStudy.remaining }} 词。{{ activeStudy.round_number > 1 ? '本轮仅练上一轮未独立答对的词。' : '本轮覆盖本次学习的全部单词。' }}</p><p class="fine">每次提交自动保存；提示、不会和答错的词会进入下一轮，直到独立答对。</p><button :disabled="busy" @click="resumeStudy">继续学习</button><button v-if="activeStudy.round_number > 1" :disabled="busy" @click="showPreviousReport">查看上一轮报告</button></section>
-        <section class="welcome"><div><p class="eyebrow">把今天的一点，变成明天的更多</p><h1>你好，{{ user.username }}。</h1><p class="muted">不必一次记住所有，只要每天向前一点。</p><p class="fine">每人同时进行一个学习批次；开始任意词库会优先恢复未完成的批次。</p></div><div class="today-date">{{ new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' }) }}</div></section>
-        <section class="review-banner"><div><span class="eyebrow">今日复习</span><h2>{{ due ? `${due} 个单词，等你再见一面` : '今天的复习，已安排妥当' }}</h2><p>{{ due ? '趁记忆还在，给它一点巩固。' : '暂时没有到期单词，挑一个词库开始学习吧。' }}</p></div><button :disabled="busy || !due" @click="start()">开始复习 <span>→</span></button></section>
+        <section v-for="progress in activeStudies" :key="progress.id" class="panel" aria-label="已保存的学习进度"><h2>{{ progress.deck_name || '旧版跨词库复习' }} · 第 {{ progress.round_number }} 轮</h2><p>本轮已完成 {{ progress.answered }}/{{ progress.total }} 词，剩余 {{ progress.remaining }} 词。{{ progress.round_number > 1 ? '本轮仅练上一轮未独立答对的词。' : '本轮覆盖本次学习的全部单词。' }}</p><p class="fine">每次提交自动保存；提示、不会和答错的词会进入下一轮，直到独立答对。</p><button :disabled="busy" @click="resumeStudy(progress)">继续学习</button><button v-if="progress.round_number > 1" :disabled="busy" @click="showPreviousReport(progress)">查看上一轮报告</button></section>
+        <section class="welcome"><div><p class="eyebrow">把今天的一点，变成明天的更多</p><h1>你好，{{ user.username }}。</h1><p class="muted">不必一次记住所有，只要每天向前一点。</p><p class="fine">各词库独立保存轮次与进度；切换词库不会丢失已答记录。</p></div><div class="today-date">{{ new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' }) }}</div></section>
+        <section class="review-banner"><div><span class="eyebrow">今日复习</span><h2>{{ due ? `${due} 个单词，等你再见一面` : '今天的复习，已安排妥当' }}</h2><p>{{ due ? '趁记忆还在，给它一点巩固。' : '暂时没有到期单词，挑一个词库开始学习吧。' }}</p></div><button :disabled="busy || !selectedReviewCount" @click="start()">复习所选词库（{{ selectedReviewCount }} 词）</button></section>
+        <fieldset class="panel"><legend>选择到期复习词库</legend><p class="fine">仅纳入已独立过关且到期的单词；未学和尚未过关词不进入复习。已有批次从保存位置继续。</p><button class="text-button" :disabled="busy" @click="reviewDeckIds = decks.filter(deck => (reviewCounts[deck.id] ?? 0) > 0).map(deck => deck.id)">全选可复习词库</button><button class="text-button" :disabled="busy" @click="reviewDeckIds = []">取消全选</button><label v-for="deck in decks" :key="deck.id" class="review-choice"><input v-model="reviewDeckIds" type="checkbox" :value="deck.id" :disabled="busy || !(reviewCounts[deck.id] > 0)" />{{ deck.name }}（{{ reviewCounts[deck.id] ?? 0 }} 词可复习）</label></fieldset>
         <div class="section-heading"><h2>我的词库 <span class="count">{{ decks.length }}</span></h2><span class="muted">共 {{ totalWords }} 个单词</span></div>
-        <div v-if="decks.length" class="deck-grid"><article v-for="(deck, index) in decks" :key="deck.id" class="panel deck-card"><span class="deck-icon" :class="`tone-${index % 3}`">{{ deck.name?.slice(0, 1) || '词' }}</span><h3>{{ deck.name || '未命名词库' }}</h3><p class="muted">{{ deck.total }} 个单词 <span class="dot">·</span> 已掌握 {{ deck.learned ?? 0 }} 个 <span class="dot">·</span> {{ deck.due }} 个待复习</p><button class="secondary" :disabled="busy" @click="openStatistics(deck.id)">统计信息</button><button class="secondary" :disabled="busy" @click="openDeck(deck.id)">管理词库</button><div class="deck-footer"><span class="fine">{{ deck.started_at ? '已开始学习' : '等待初次相遇' }}</span><button class="text-button" :disabled="busy || !deck.total" @click="start(deck)">{{ deck.started_at ? '继续学习' : '开始学习' }} →</button></div></article></div>
+        <div v-if="decks.length" class="deck-grid"><article v-for="(deck, index) in decks" :key="deck.id" class="panel deck-card"><span class="deck-icon" :class="`tone-${index % 3}`">{{ deck.name?.slice(0, 1) || '词' }}</span><h3>{{ deck.name || '未命名词库' }}</h3><p class="muted">{{ deck.total }} 个单词 <span class="dot">·</span> 已过关 {{ deck.learned ?? 0 }} 个 <span class="dot">·</span> {{ deck.due }} 个待复习</p><button class="secondary" :disabled="busy" @click="openStatistics(deck.id)">统计信息</button><button class="secondary" :disabled="busy" @click="openDeck(deck.id)">管理词库</button><p v-if="deckProgress(deck.id)" class="fine">第 {{ deckProgress(deck.id)!.round_number }} 轮 · 已答 {{ deckProgress(deck.id)!.answered }}/{{ deckProgress(deck.id)!.total }}</p><div class="deck-footer"><span class="fine">{{ deck.started_at ? '已开始学习' : '等待初次相遇' }}</span><button class="text-button" :disabled="busy || !deck.total" @click="start(deck)">{{ deck.started_at ? '继续学习' : '开始学习' }} →</button></div></article></div>
         <section v-else class="panel empty"><h3>第一本词库，从这里开始</h3><p class="muted">导入一份 JSON 单词表，开启你的记忆旅程。</p><button class="primary" @click="page = 'import'">导入词库</button></section>
       </template>
+      <StatisticsPanel v-else-if="page === 'overall-statistics'" :load="api" :decks="decks" />
       <section v-else-if="page === 'speech' && isParent && speechSettings" class="panel speech-panel" aria-labelledby="speech-heading">
         <h1 id="speech-heading">云端朗读设置</h1>
         <p>家庭共用。云端启用后，单词和例句由服务器按主服务、备用服务顺序合成；设备语音回退默认关闭。关闭主服务则使用原有词典音频／设备语音。</p>

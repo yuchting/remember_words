@@ -132,13 +132,12 @@ def validate(value):
                     raise ValueError('复习阶段与到期时间不符')
                 owners[word.id] = deck.id
         sessions = index(backup.study_sessions)
-        if sum(s.status == 'active' for s in sessions.values()) > 1:
-            raise ValueError('多个活动批次')
+        active_decks = [s.deck_id for s in sessions.values() if s.status == 'active']
+        if len(active_decks) != len(set(active_decks)):
+            raise ValueError('同一词库存在多个活动批次')
         for session in sessions.values():
             if session.deck_id is not None and session.deck_id not in decks:
                 raise ValueError('批次词库不存在')
-            if session.kind == 'review' and session.deck_id is not None:
-                raise ValueError('复习批次不应限定词库')
             if session.kind == 'new' and session.deck_id is None and session.status == 'active':
                 raise ValueError('活动学习批次缺少词库')
         items = index(backup.study_items)

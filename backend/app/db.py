@@ -47,16 +47,28 @@ CREATE TABLE IF NOT EXISTS dictionary_cache (
 PRAGMA user_version=1;
 '''
 
-SCHEMA = BASE_SCHEMA + '''
+SCHEMA_V2 = BASE_SCHEMA + '''
 ALTER TABLE study_items ADD COLUMN practice_pending INTEGER NOT NULL DEFAULT 0;
 PRAGMA user_version=2;
 '''
+
+ACTIVE_INDEXES = '''
+DROP INDEX active_study;
+CREATE UNIQUE INDEX active_study ON study_sessions(user_id,deck_id) WHERE status='active' AND deck_id IS NOT NULL;
+CREATE UNIQUE INDEX active_study_legacy ON study_sessions(user_id) WHERE status='active' AND deck_id IS NULL;
+PRAGMA user_version=3;
+'''
+SCHEMA = SCHEMA_V2 + ACTIVE_INDEXES
 
 
 def migrate(db: sqlite3.Connection) -> None:
     if db.execute('PRAGMA user_version').fetchone()[0] == 1:
         db.execute('ALTER TABLE study_items ADD COLUMN practice_pending INTEGER NOT NULL DEFAULT 0')
         db.execute('PRAGMA user_version=2')
+    if db.execute('PRAGMA user_version').fetchone()[0] == 2:
+        for statement in ACTIVE_INDEXES.split(';'):
+            if statement.strip():
+                db.execute(statement)
 
 
 @contextmanager
@@ -81,7 +93,8 @@ def initialize():
         version = db.execute('PRAGMA user_version').fetchone()[0]
         if version == 0:
             db.executescript(SCHEMA)
-        elif version == 1:
+        elif version in (1, 2):
+            db.execute('BEGIN IMMEDIATE')
             migrate(db)
-        elif version != 2:
+        elif version != 3:
             raise ValueError('不支持的数据库版本')

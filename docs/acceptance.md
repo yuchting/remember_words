@@ -1,5 +1,12 @@
 # 首版验收记录
 
+## 独立词库轮次、总体统计与迁移（2026-10-20）
+
+- 后端 74 项测试通过，均使用临时数据库：包含多词库独立轮次、选择复习、未学排除、越权、并发恢复防重、旧跨库批次继续、schema 1/2 迁移保留记录及位置、版本 1/2/3 整库校验、个人多活动批次备份，以及统计筛选、错词和计数。
+- `npm --prefix frontend test` 通过：实际组件脚本配合 API 替身，覆盖多批次切换、复习选择请求、总体统计空值/失败/竞态。`npm --prefix frontend run build`、`bash -n sop.sh` 通过。
+- 后续已安装隔离 Playwright 并完成真实认证后端交互及浏览器布局验证，见文末。正式数据库已在线备份并用真实副本验证迁移、逐表哈希一致、完整性及幂等，见 `deployment.md`；后端新增迁移失败回滚测试后全套 75 项通过。随后获准正式升级：停服后新增最新备份，正式库迁移至 schema 3，所有表哈希保持一致，完整性及外键通过；`words.service` 已启动为 `active/running`，健康检查和首页访问通过。详见 `deployment.md`。
+- 现有历史没有可靠的过关事件时间，不展示每日新增过关数；统计阶段不代表记忆概率。历史按 UTC 日期聚合，最近错误时间按设备本地显示。
+
 ## Azure / Google 云端朗读前端
 
 - 新增家长／admin 的主备用服务、密钥留空保留／显式清除、Region、Voice、设备回退开关和已保存配置试听。密钥不回显；PUT 显式构造字段，不发送只读 `key_set`。云端关闭保留原词典／设备语音流程。
@@ -108,3 +115,14 @@
 - 记忆程度用复习阶段、答对次数和真实答题时间线表达，不虚构遗忘概率。
 - 单进程登录限速，重启即清空；仅供局域网首版。
 - 测试客户端有 Starlette 关于 httpx 的弃用提示，检查仍通过。
+
+## Playwright 独立验收（2026-10-20）
+
+- 脚本：`backend/tests/playwright_acceptance.mjs`。Playwright 安装于 `/tmp/opencode/words-playwright`，未加入项目依赖。系统虽提示不在官方支持列表，Ubuntu 24.04 fallback Chromium 下载及启动成功；实际浏览器版本 `156.0.8078.4`。
+- 真实 FastAPI/SQLite，同源生产静态页面；本次服务 `http://127.0.0.1:56115`，临时数据库位于 `/tmp/opencode/words-browser-wTbAje/words.sqlite3`。仅创建测试服务，退出已终止；未操作正式 18765 服务或正式数据库。
+- 家长种子账户通过后端 DB 初始化；孩子与 A/B/C/D 词库通过真实 API 创建；孩子通过 UI 登录。A/B 各提交一次错误答案，保存为两个独立批次，均为第 1 轮已答 1/2；A/B/A 切换并刷新页面后点击继续，当前题及后端队列响应保持一致。刷新返回词库，未声称自动恢复学习页面。
+- 临时库设置 C/D 已过关到期词，并特意设置 C 的一个未学词 `stage=-1,due_at=0`。UI 多选 C/D，生成两批独立复习，共 3 词；SQL 确认未学词未进入复习。
+- 总体统计使用真实作答记录，仅将 A 的错误记录时间移到 40 天前，检查最近 7 天排除 A、全部历史包含 A、词库 A 筛选排除 B、最近 30 天无 A 错词。原生 progress bars 存在且 C 为 50%、D 为 100%。浏览器 `pageerror` 为 0。
+- 480/1280 宽度：词库页、总体统计页 `document.documentElement.scrollWidth <= innerWidth`；480 学习页同样无整页横向溢出。统计宽表允许容器内横向滚动，未将其误判为整页溢出。
+- 修正统计最近错误时间表头为“本地时间”后重新构建并复验通过，最新服务为临时 `http://127.0.0.1:50025`（已退出）。最新证据目录：`/tmp/opencode/words-browser-1HJiV4/`，含 `result.json`、`server.log`、`study-A-480.png`、`study-B-480.png`、`decks-480.png`、`decks-1280.png`、`statistics-480.png`、`statistics-1280.png`。临时目录不会进入 Git。
+- 复现：先 `npm --prefix frontend run build`，再运行脚本顶部安装命令及 `node backend/tests/playwright_acceptance.mjs`；每次自动创建隔离库、选择空闲本地端口，结束停止自身服务。目标设备发音、真实云服务、移动设备触控不属于本轮验收。

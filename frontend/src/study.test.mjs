@@ -12,6 +12,7 @@ const script = app.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
   .replace('import.meta.env.BASE_URL', "'/'")
   .replace("from 'vue'", `from '${import.meta.resolve('vue')}'`)
   .replace("from './utils'", `from '${utils}'`)
+  .replace("import StatisticsPanel from './StatisticsPanel.vue'", "")
 let now = 0
 let tick
 Object.defineProperty(globalThis, 'performance', { value: { now: () => now }, configurable: true })
@@ -21,7 +22,7 @@ globalThis.window = { speechSynthesis: {} }
 const spoken = []
 globalThis.speechSynthesis = { cancel() {}, speak: value => spoken.push(value.text) }
 globalThis.SpeechSynthesisUtterance = class { constructor(text) { this.text = text } }
-const state = await import(moduleUrl(`const onMounted = () => {}; const onUnmounted = () => {};\n${script}\nexport { session, item, answer, answered, content, busy, cooldownSeconds, submit, reveal, continueStudy, studyEnter, editingExample, resetFluency, key, beforeInput, nativeInput, report, reportWords, answerInput, speak, clearAudio, resumeStudy, activeStudy };`))
+const state = await import(moduleUrl(`const onMounted = () => {}; const onUnmounted = () => {};\n${script}\nexport { session, item, answer, answered, content, busy, cooldownSeconds, submit, reveal, continueStudy, studyEnter, editingExample, resetFluency, key, beforeInput, nativeInput, report, reportWords, answerInput, speak, clearAudio, resumeStudy, activeStudies, reviewDeckIds, reviewCounts, selectedReviewCount, refresh, start, deckProgress };`))
 globalThis.document = { body: {}, activeElement: null }
 state.session.value = 1
 state.item.value = { id: 2 }
@@ -156,8 +157,7 @@ for (const spellingCorrect of [true, false]) {
     request = JSON.parse(options.body)
     return Response.json({ word: 'word', correct: false, practice: true, spelling_correct: spellingCorrect })
   }
-  state.activeStudy.value = { id: 1 }
-  await state.resumeStudy()
+  await state.resumeStudy({ id: 1 })
   now += 1; state.key('w'); now += 1; state.key('o'); now += 1
   await state.submit()
   assert.equal(request.practice, true)
@@ -303,4 +303,32 @@ state.report.value = { words: reportRows }
 assert.deepEqual(state.reportWords.value.map(word => word.word_id), [3, 4, 2, 1, 5])
 assert.deepEqual(state.report.value.words.map(word => word.word_id), [1, 2, 3, 4, 5], '排序不改变原报告')
 assert.match(app, /<table><caption class="sr-only">本轮单词结果，错词优先/)
+// 多词库独立恢复；复习请求只发送所选词库，刷新后保留全部批次。
+const progressA = { id: 101, deck_id: 1, round_number: 3, total: 4, answered: 2 }
+const progressB = { id: 102, deck_id: 2, round_number: 1, total: 6, answered: 0 }
+let selection
+fetch = async (url, options) => {
+  if (url.endsWith('/reviews/study')) {
+    selection = JSON.parse(options.body)
+    return Response.json({ id: 102, sessions: [progressB] })
+  }
+  if (url.endsWith('/decks')) return Response.json([{ id: 1, name: 'A' }, { id: 2, name: 'B' }])
+  if (url.endsWith('/reviews/due')) return Response.json({ count: 6, decks: [{ deck_id: 1, count: 0 }, { deck_id: 2, count: 6 }] })
+  if (url.endsWith('/study/active')) return Response.json({ sessions: [progressA, progressB] })
+  if (url.endsWith('/next')) return Response.json({ complete: false, item: { id: 99 } })
+  throw new Error(`Unexpected URL: ${url}`)
+}
+state.reviewDeckIds.value = [2, 999]
+await state.refresh()
+assert.deepEqual(state.reviewDeckIds.value, [2])
+assert.equal(state.selectedReviewCount.value, 6)
+assert.equal(state.deckProgress(1).round_number, 3)
+await state.resumeStudy(progressA)
+assert.equal(state.session.value, 101)
+await state.resumeStudy(progressB)
+assert.equal(state.session.value, 102)
+await state.start()
+assert.deepEqual(selection, { deck_ids: [2] })
+assert.equal(state.session.value, 102)
+assert.equal(state.activeStudies.value.length, 2)
 console.log('study checks passed')

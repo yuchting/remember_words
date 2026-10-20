@@ -1,6 +1,9 @@
 """词库管理；注册函数复用现有认证依赖，避免循环导入。"""
 import json
-from fastapi import Depends, HTTPException, Response
+import time
+from datetime import datetime, timedelta, timezone
+from typing import Literal
+from fastapi import Depends, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field
 from .db import connect
 from .study import INTERVALS
@@ -22,6 +25,78 @@ def register(app, user, owned_word, cancel_word_sessions):
     class Rename(BaseModel):
         model_config = ConfigDict(strict=True, extra='forbid')
         name: str = Field(min_length=1, max_length=100)
+
+    @app.get('/api/statistics')
+    def statistics(deck_id: int | None = None, period: Literal['7', '30', 'all'] = Query('7', alias='range'),
+                   account=Depends(user)) -> dict:
+        now = time.time()
+        today = datetime.fromtimestamp(now, timezone.utc).date()
+        start = None if period == 'all' else datetime.combine(
+            today - timedelta(days=int(period) - 1), datetime.min.time(), timezone.utc).timestamp()
+        with connect() as db:
+            db.execute('BEGIN')
+            if deck_id is not None:
+                owned_deck(db, deck_id, account)
+            scope = 'd.user_id=?' + (' AND d.id=?' if deck_id is not None else '')
+            params = (account['id'],) if deck_id is None else (account['id'], deck_id)
+            decks = [dict(row) for row in db.execute(f'''SELECT d.id,d.name,count(w.id) total,
+                coalesce(sum(w.stage>=0),0) passed,
+                coalesce(sum(w.stage>=0 AND w.due_at<=?),0) due
+                FROM decks d LEFT JOIN words w ON w.deck_id=d.id
+                WHERE {scope} GROUP BY d.id ORDER BY d.id''', (now, *params))]
+            by_id = {deck['id']: deck for deck in decks}
+            totals = {'total': 0, 'passed': 0, 'due': 0,
+                      'stages': {str(stage): 0 for stage in range(-1, len(INTERVALS))}}
+            for deck in decks:
+                deck['stages'] = {str(stage): 0 for stage in range(-1, len(INTERVALS))}
+                for key in ('total', 'passed', 'due'):
+                    totals[key] += deck[key]
+            for row in db.execute(f'''SELECT w.deck_id,w.stage,count(*) count FROM words w
+                    JOIN decks d ON d.id=w.deck_id WHERE {scope} GROUP BY w.deck_id,w.stage''', params):
+                by_id[row['deck_id']]['stages'][str(row['stage'])] = row['count']
+                totals['stages'][str(row['stage'])] += row['count']
+            # Only persisted first answers count; spelling practice never adds attempts.
+            history = f'''WITH history AS (SELECT a.correct,a.created_at,i.word_id,i.round_number,
+                s.kind,w.word,w.meaning,d.id deck_id,d.name deck_name
+                FROM attempts a JOIN study_items i ON i.id=a.item_id
+                JOIN study_sessions s ON s.id=i.session_id JOIN words w ON w.id=i.word_id
+                JOIN decks d ON d.id=w.deck_id WHERE {scope} AND s.user_id=?
+                AND a.created_at<=? AND (? IS NULL OR a.created_at>=?)) '''
+            history_params = (*params, account['id'], now, start, start)
+            mistakes = [dict(row) for row in db.execute(history + '''SELECT word_id,word,meaning,
+                deck_id,deck_name,count(*) attempts,sum(correct=0) wrong,
+                1.0*sum(correct=0)/count(*) error_rate,
+                max(CASE WHEN correct=0 THEN created_at END) last_wrong_at
+                FROM history GROUP BY word_id HAVING wrong>0
+                ORDER BY wrong DESC,last_wrong_at DESC,word_id LIMIT 50''', history_params)]
+            first_round = {kind: {'attempts': 0, 'correct': 0, 'accuracy': None} for kind in ('new', 'review')}
+            for row in db.execute(history + '''SELECT kind,count(*) attempts,sum(correct) correct
+                    FROM history WHERE round_number=1 GROUP BY kind''', history_params):
+                first_round[row['kind']] = {'attempts': row['attempts'], 'correct': row['correct'],
+                                             'accuracy': row['correct'] / row['attempts']}
+            daily_by_date = {row['date']: dict(row) for row in db.execute(history + '''SELECT
+                date(created_at,'unixepoch') date,count(*) attempts,sum(correct) correct
+                FROM history GROUP BY date ORDER BY date''', history_params)}
+            first_day = (datetime.fromtimestamp(start, timezone.utc).date() if start is not None
+                         else min((datetime.fromisoformat(day).date() for day in daily_by_date), default=today))
+            daily = []
+            for offset in range((today - first_day).days + 1):
+                day = (first_day + timedelta(days=offset)).isoformat()
+                daily.append(daily_by_date.get(day, {'date': day, 'attempts': 0, 'correct': 0})
+                             | {'new_passed': None})
+            midnight = datetime.combine(today, datetime.min.time(), timezone.utc).timestamp()
+            due_counts = {row['date']: row['count'] for row in db.execute(f'''SELECT
+                date(w.due_at,'unixepoch') date,count(*) count FROM words w
+                JOIN decks d ON d.id=w.deck_id WHERE {scope} AND w.stage>=0
+                AND w.due_at>=? AND w.due_at<? GROUP BY date''', (*params, midnight, midnight + 7 * 86400))}
+        return {'deck_id': deck_id, 'range': period, 'timezone': 'UTC', 'generated_at': now,
+                'since': start, 'decks': decks, 'totals': totals, 'mistakes': mistakes,
+                'first_round': first_round, 'daily': daily,
+                'new_passed_available': False,
+                'new_passed_note': '历史未记录过关时间及阶段变更，无法可靠推导每日新过关数',
+                'upcoming_due': [{'date': (today + timedelta(days=offset)).isoformat(),
+                                  'count': due_counts.get((today + timedelta(days=offset)).isoformat(), 0)}
+                                 for offset in range(7)]}
 
     @app.get('/api/decks/{did}')
     def details(did: int, account=Depends(user)):

@@ -217,7 +217,7 @@ class CoreChecks(unittest.TestCase):
             connection.execute("INSERT INTO users VALUES(1,'old','hash','parent',1)")
             database.migrate(connection)
             database.migrate(connection)
-            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0], 2)
+            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0], 3)
             self.assertEqual(connection.execute('SELECT username FROM users').fetchone()[0], 'old')
             self.assertIn('practice_pending', [r[1] for r in connection.execute('PRAGMA table_info(study_items)')])
 

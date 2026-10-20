@@ -13,6 +13,7 @@ const script = app.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
   .replace('onUnmounted(() => {', 'onMounted(() => {')
   .replace("from 'vue'", `from '${import.meta.resolve('vue')}'`)
   .replace("from './utils'", `from '${utils}'`)
+  .replace("import StatisticsPanel from './StatisticsPanel.vue'", "")
 const state = await import(moduleUrl(`const onMounted = () => {};\n${script}\nexport { source, driveUrl, sheets, selectedSheets, skipped, preview, loadDrive, previewImport, busy };`))
 const result = {
   sheets: [

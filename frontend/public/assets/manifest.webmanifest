@@ -1,0 +1,23 @@
+{
+  "id": "../",
+  "name": "词间 · 每天记一点",
+  "short_name": "词间",
+  "lang": "zh-CN",
+  "start_url": "../",
+  "scope": "../",
+  "display": "standalone",
+  "theme_color": "#315c45",
+  "background_color": "#f6f4ed",
+  "icons": [
+    {
+      "src": "words-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "words-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

@@ -13,6 +13,7 @@ const script = app.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
   .replace('import.meta.env.BASE_URL', "'/words/'")
   .replace("from 'vue'",  `from '${import.meta.resolve('vue')}'`)
   .replace("from './utils'", `from '${utils}'`)
+  .replace("import StatisticsPanel from './StatisticsPanel.vue'", "")
 const state = await import(moduleUrl(`const onMounted = () => {};\n${script}\nexport { api, user, session, csrf, busy, error, notice, password, childPassword, resetPasswords, exportPassword, restorePassword, restoreFile, restoreConfirmation, restoreUnderstood, canRestore, selectRestoreFile, exportDatabase, restoreDatabase, personalPassword, personalFile, personalUnderstood, personalConfirmation, canRestorePersonal, restorePersonalBackup, personalExportPassword, exportPersonalBackup, selectPersonalFile };`))
 globalThis.window = {}
 const file = new File(['SQLite test'], 'backup.sqlite3')
@@ -146,9 +147,9 @@ fetch = async (url, options) => {
     assert.deepEqual(JSON.parse(options.body), { password: ' child 密码 ', confirmation: 'OVERWRITE_MY_DATA', backup: { format: 'remember_words_user', version: 1, decks: [] } })
     return Response.json({ backup: 'personal-before.json' })
   }
-  if (url === '/words/api/study/active') return Response.json({ session: null })
+  if (url === '/words/api/study/active') return Response.json({ session: null, sessions: [] })
   if (url === '/words/api/decks') return Response.json([])
-  if (url === '/words/api/reviews/due') return Response.json({ count: 0 })
+  if (url === '/words/api/reviews/due') return Response.json({ count: 0, decks: [] })
   throw new Error(`意外请求 ${url}`)
 }
 await state.restorePersonalBackup()

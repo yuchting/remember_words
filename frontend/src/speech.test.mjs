@@ -17,6 +17,7 @@ const script = app.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
   .replace('nextTick, onMounted,', 'nextTick,').replace(', onUnmounted }', ' }')
   .replace('import.meta.env.BASE_URL', "'/words/'")
   .replace("from 'vue'", `from '${import.meta.resolve('vue')}'`).replace("from './utils'", `from '${utils}'`)
+  .replace("import StatisticsPanel from './StatisticsPanel.vue'", "")
 const spoken = [], players = [], revoked = [], requests = []
 globalThis.window = { speechSynthesis: {} }
 globalThis.speechSynthesis = { cancel() {}, speak: value => spoken.push(value.text) }

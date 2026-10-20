@@ -345,39 +345,77 @@ def decks(account=Depends(user)):
             (time.time(), account['id']))]
 
 
+def session_details(db: sqlite3.Connection, session: sqlite3.Row) -> dict:
+    progress = round_progress(db, session['id'], session['round_number'])
+    return dict(session) | progress | {'progress': progress}
+
+
+def active_sessions(db: sqlite3.Connection, user_id: int) -> list[dict]:
+    return [session_details(db, row) for row in db.execute('''SELECT s.id,s.deck_id,d.name deck_name,
+        s.kind,s.round_number FROM study_sessions s LEFT JOIN decks d ON d.id=s.deck_id
+        WHERE s.user_id=? AND s.status='active' ORDER BY s.id''', (user_id,))]
+
+
+def active_for_deck(db: sqlite3.Connection, user_id: int, deck_id: int) -> sqlite3.Row | None:
+    return db.execute('''SELECT s.id FROM study_sessions s WHERE s.user_id=? AND s.status='active'
+        AND (s.deck_id=? OR (s.deck_id IS NULL AND EXISTS (
+            SELECT 1 FROM study_items i JOIN words w ON w.id=i.word_id
+            WHERE i.session_id=s.id AND w.deck_id=?))) ORDER BY s.id LIMIT 1''',
+        (user_id, deck_id, deck_id)).fetchone()
+
+
+AVAILABLE_WORD = '''NOT EXISTS (
+    SELECT 1 FROM study_items i JOIN study_sessions s ON s.id=i.session_id
+    WHERE i.word_id=w.id AND s.status='active')'''
+
+
 @app.get('/api/reviews/due')
 def due(account=Depends(user)):
     with connect() as db:
-        count = db.execute('''SELECT count(*) FROM words w JOIN decks d ON d.id=w.deck_id
-            WHERE d.user_id=? AND w.due_at<=? AND NOT EXISTS (
-                SELECT 1 FROM study_items i JOIN study_sessions s ON s.id=i.session_id
-                WHERE i.word_id=w.id AND s.status='active'
-            )''', (account['id'], time.time())).fetchone()[0]
-        return {'count': count}
+        sessions = active_sessions(db, account['id'])
+        rows = db.execute(f'''SELECT d.id deck_id,d.name deck_name,count(w.id) count
+            FROM decks d LEFT JOIN words w ON w.deck_id=d.id AND w.stage>=0 AND w.due_at<=?
+            AND {AVAILABLE_WORD} WHERE d.user_id=? GROUP BY d.id ORDER BY d.id''',
+            (time.time(), account['id'])).fetchall()
+        decks = []
+        for row in rows:
+            active = active_for_deck(db, account['id'], row['deck_id'])
+            decks.append(dict(row) | {'active_session': next(
+                (s for s in sessions if active and s['id'] == active['id']), None)})
+        return {'count': sum(row['count'] for row in rows), 'decks': decks, 'sessions': sessions}
 
 
-def start_study(account, deck_id=None):
+def start_study(account: dict, deck_id: int | None = None, deck_ids: list[int] | None = None) -> dict:
     with connect() as db:
         db.execute('BEGIN IMMEDIATE')
-        if deck_id is not None and not db.execute('SELECT id FROM decks WHERE id=? AND user_id=?', (deck_id, account['id'])).fetchone():
+        owned = {row['id'] for row in db.execute('SELECT id FROM decks WHERE user_id=?', (account['id'],))}
+        selected = [deck_id] if deck_id is not None else sorted(owned) if deck_ids is None else list(dict.fromkeys(deck_ids))
+        if any(did not in owned for did in selected):
             raise HTTPException(404, '词库不存在')
-        active = db.execute("SELECT id FROM study_sessions WHERE user_id=? AND status='active'", (account['id'],)).fetchone()
-        if active:
-            return {'id': active['id']}
-        if deck_id is not None:
-            rows = db.execute('SELECT id FROM words WHERE deck_id=? AND stage=-1', (deck_id,)).fetchall()
-        else:
-            rows = db.execute('''SELECT w.id FROM words w JOIN decks d ON d.id=w.deck_id
-                WHERE d.user_id=? AND w.due_at<=?''', (account['id'], time.time())).fetchall()
-        if not rows:
+        ids = []
+        now = time.time()
+        for did in selected:
+            active = active_for_deck(db, account['id'], did)
+            if active:
+                if active['id'] not in ids:
+                    ids.append(active['id'])
+                continue
+            condition = 'w.stage=-1' if deck_id is not None else 'w.stage>=0 AND w.due_at<=?'
+            params = (did,) if deck_id is not None else (did, now)
+            rows = db.execute(f'''SELECT w.id FROM words w WHERE w.deck_id=? AND {condition}
+                AND {AVAILABLE_WORD} ORDER BY w.id''', params).fetchall()
+            if not rows:
+                continue
+            sid = db.execute('INSERT INTO study_sessions(user_id,deck_id,kind) VALUES(?,?,?)',
+                             (account['id'], did, 'new' if deck_id is not None else 'review')).lastrowid
+            add_round(db, sid, 1, [row['id'] for row in rows])
+            if deck_id is not None:
+                db.execute('UPDATE decks SET started_at=COALESCE(started_at,?) WHERE id=?', (now, did))
+            ids.append(sid)
+        if not ids:
             raise HTTPException(409, '没有待学习单词，请等待复习到期')
-        cursor = db.execute('INSERT INTO study_sessions(user_id,deck_id,kind) VALUES(?,?,?)',
-                            (account['id'], deck_id, 'new' if deck_id is not None else 'review'))
-        sid = cursor.lastrowid
-        add_round(db, sid, 1, [r['id'] for r in rows])
-        if deck_id is not None:
-            db.execute('UPDATE decks SET started_at=COALESCE(started_at,?) WHERE id=?', (time.time(), deck_id))
-        return {'id': sid}
+        sessions = {s['id']: s for s in active_sessions(db, account['id'])}
+        return {'id': ids[0], 'sessions': [sessions[sid] for sid in ids]}
 
 
 @app.post('/api/decks/{deck_id}/study')
@@ -385,9 +423,13 @@ def start_deck(deck_id: int, account=Depends(user)):
     return start_study(account, deck_id)
 
 
+class ReviewSelection(InputModel):
+    deck_ids: list[int] = Field(min_length=1)
+
+
 @app.post('/api/reviews/study')
-def start_review(account=Depends(user)):
-    return start_study(account)
+def start_review(data: ReviewSelection | None = None, account=Depends(user)):
+    return start_study(account, deck_ids=data.deck_ids if data is not None else None)
 
 
 def owned_session(db, sid, account):
@@ -410,9 +452,8 @@ def round_progress(db: sqlite3.Connection, sid: int, number: int) -> dict:
 @app.get('/api/study/active')
 def active_study(account=Depends(user)):
     with connect() as db:
-        session = db.execute("SELECT id,round_number,kind FROM study_sessions WHERE user_id=? AND status='active'",
-                             (account['id'],)).fetchone()
-        return {'session': dict(session) | round_progress(db, session['id'], session['round_number']) if session else None}
+        sessions = active_sessions(db, account['id'])
+        return {'sessions': sessions, 'session': sessions[0] if sessions else None}
 
 
 @app.get('/api/study/{sid}/next')

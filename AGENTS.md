@@ -14,7 +14,7 @@
 ## 业务不变量
 
 - 家长由 CLI 创建，网页管理孩子；所有资源由后端校验归属，家长管理权限必须显式授予，不能靠前端隐藏。
-- 每用户最多一个活动学习批次；首轮覆盖未学词，之后仅上一轮错词。提示、揭示答案、不会均不能算独立回忆成功；当前题响应不提前下发拼写。
+- 每用户每词库最多一个活动学习批次，词库间独立轮次；旧跨库复习批次原位继续，涉及词库不得另建重叠批次。复习可选择多个词库，各库独立批次，仅纳入 stage>=0 且到期词；首轮覆盖未学词，之后仅上一轮错词。提示、揭示答案、不会均不能算独立回忆成功；当前题响应不提前下发拼写。
 - 判分仅 NFC + strip + casefold，不放宽内部空格、标点、拼写。队列持久化；答题、调度、轮次推进同一事务；`attempts.item_id` 唯一，重复请求不重复推进。
 - 间隔秒数：`600,86400,259200,604800,1209600,2592000`；失败重新过关回到阶段 0，最后保持阶段 5；每词每批次最多升级一次。阶段不是精确记忆概率。
 - 导入先预览、重复词逐组选一或全排除；最终接口拒绝重复。重复范围为本次输入，不跨词库。`word`、`meaning` 必填，`id` 不作主键，可选例句/译文；请求 ≤2 MiB，词库 ≤5000 条，事务全成或全败。
@@ -38,7 +38,7 @@
 保持小结构、标准库优先，不加无需求分层。改 API 同步前端类型；依赖变更同步锁文件；路径用 pathlib，输出路径用 `/`。保留用户工作，不擅自提交、推送或覆盖数据。
 
 ```sh
-.venv/bin/python -m unittest backend.tests.check_core backend.tests.check_management backend.tests.check_sources backend.tests.check_database_admin backend.tests.check_user_backup backend.tests.check_sop backend.tests.check_speech -v
+.venv/bin/python -m unittest backend.tests.check_core backend.tests.check_management backend.tests.check_sources backend.tests.check_database_admin backend.tests.check_user_backup backend.tests.check_sop backend.tests.check_speech backend.tests.check_statistics backend.tests.check_multi_study -v
 npm --prefix frontend test
 npm --prefix frontend run build
 bash -n sop.sh
