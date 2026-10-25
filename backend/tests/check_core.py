@@ -9,6 +9,9 @@ TEMP = tempfile.TemporaryDirectory()
 os.environ['WORDS_DB'] = str(Path(TEMP.name) / 'test.sqlite3')
 
 from fastapi.testclient import TestClient
+from backend.app import db as test_database
+# Other suites may import db before WORDS_DB is set; always bind tests to temporary storage.
+test_database.DB_PATH = Path(TEMP.name) / 'test.sqlite3'
 from backend.app.db import connect, initialize
 from backend.app.main import app, hasher
 from backend.app.study import schedule
@@ -60,7 +63,7 @@ class CoreChecks(unittest.TestCase):
         word = 'hello' if item['meaning'] == '你好' else 'world'
         self.post(f'/api/study/{sid}/items/{item["id"]}/answer', {'answer': word})
         with connect() as db:
-            self.assertEqual([r[0] for r in db.execute('SELECT stage FROM words')], [-1, -1])
+            self.assertEqual(sorted(r[0] for r in db.execute('SELECT stage FROM words')), [-1, 0])
         self.assertEqual(self.client.get(f'/api/study/{sid}/rounds/1').status_code, 409)
         self.assertEqual(self.post(f'/api/study/{sid}/round-action', {'action': 'interrupt', 'round_number': 1}).status_code, 422)
         with connect() as db:
@@ -100,7 +103,7 @@ class CoreChecks(unittest.TestCase):
         with connect() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM attempts WHERE correct=0').fetchone()[0], 1)
             self.assertEqual(db.execute('SELECT hint_used FROM study_items WHERE id=?', (item['id'],)).fetchone()[0], 1)
-            self.assertEqual([r[0] for r in db.execute('SELECT stage FROM words')], [-1, -1])
+            self.assertEqual(sorted(r[0] for r in db.execute('SELECT stage FROM words')), [-1, -1])
 
     def test_round_progress_survives_relogin(self):
         deck = self.make_deck()
@@ -114,7 +117,7 @@ class CoreChecks(unittest.TestCase):
             iid = question['id']
             self.login('alice')
             self.assertEqual(self.client.get(f'/api/study/{sid}/next').json()['item'], question)
-            self.assertEqual(self.post('/api/reviews/study').json()['id'], sid)
+            self.assertEqual(self.post('/api/reviews/study').status_code, 409)
             self.assertFalse(self.post(f'/api/study/{sid}/items/{iid}/answer', {'skip': True}).json()['correct'])
             with connect() as db:
                 spelling = db.execute('SELECT w.word FROM words w JOIN study_items i ON i.word_id=w.id WHERE i.id=?', (iid,)).fetchone()[0]
@@ -167,7 +170,7 @@ class CoreChecks(unittest.TestCase):
                 word = db.execute('SELECT w.word FROM words w JOIN study_items i ON i.word_id=w.id WHERE i.id=?', (item['id'],)).fetchone()[0]
             self.post(f'/api/study/{review}/items/{item["id"]}/answer', {'answer': word})
         with connect() as db:
-            self.assertEqual([r[0] for r in db.execute('SELECT stage FROM words')], [1, 1])
+            self.assertEqual([r[0] for r in db.execute('SELECT stage FROM words')], [0, 0])
 
     def test_wrong_review_resets_and_blocks_future_items(self):
         deck = self.make_deck()
@@ -237,7 +240,7 @@ class CoreChecks(unittest.TestCase):
             connection.execute("INSERT INTO users VALUES(1,'old','hash','parent',1)")
             database.migrate(connection)
             database.migrate(connection)
-            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0], 3)
+            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0], 4)
             self.assertEqual(connection.execute('SELECT username FROM users').fetchone()[0], 'old')
             self.assertIn('practice_pending', [r[1] for r in connection.execute('PRAGMA table_info(study_items)')])
 
@@ -295,7 +298,7 @@ class CoreChecks(unittest.TestCase):
         self.assertFalse(done['practice_pending'])
         self.assertTrue(done['round_finished'])
         advanced = snapshot()
-        self.assertEqual(advanced[0], initial[0])
+        self.assertEqual(advanced[0], pending[0])
         self.assertEqual(advanced[1], pending[1])
         self.assertEqual(advanced[2], 2)
         for payload in ({'answer': 'bad'}, {'answer': 'HELLO', 'practice': True}):

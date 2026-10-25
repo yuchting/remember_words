@@ -35,10 +35,10 @@ def _validate(connection):
     connection.execute('PRAGMA query_only=ON')
     connection.execute('PRAGMA trusted_schema=OFF')
     version = connection.execute('PRAGMA user_version').fetchone()[0]
-    if version not in (1, 2, 3):
-        raise ValueError('仅支持数据库版本 1、2、3')
+    if version not in (1, 2, 3, 4):
+        raise ValueError('仅支持数据库版本 1、2、3、4')
     with closing(sqlite3.connect(':memory:')) as expected:
-        expected.executescript({1: db.BASE_SCHEMA, 2: db.SCHEMA_V2, 3: db.SCHEMA}[version])
+        expected.executescript({1: db.BASE_SCHEMA, 2: db.SCHEMA_V2, 3: db.SCHEMA_V3, 4: db.SCHEMA}[version])
         if _schema(connection) != _schema(expected):
             raise ValueError('数据库结构不匹配，或包含额外表、索引、视图、触发器')
     if connection.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:

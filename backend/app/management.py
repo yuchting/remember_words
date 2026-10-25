@@ -56,7 +56,7 @@ def register(app, user, owned_word, cancel_word_sessions):
                 by_id[row['deck_id']]['stages'][str(row['stage'])] = row['count']
                 totals['stages'][str(row['stage'])] += row['count']
             # Only persisted first answers count; spelling practice never adds attempts.
-            history = f'''WITH history AS (SELECT a.correct,a.created_at,i.word_id,i.round_number,
+            history = f'''WITH history AS (SELECT a.correct,a.created_at,a.delayed_recall,i.word_id,i.round_number,
                 s.kind,w.word,w.meaning,d.id deck_id,d.name deck_name
                 FROM attempts a JOIN study_items i ON i.id=a.item_id
                 JOIN study_sessions s ON s.id=i.session_id JOIN words w ON w.id=i.word_id
@@ -74,6 +74,9 @@ def register(app, user, owned_word, cancel_word_sessions):
                     FROM history WHERE round_number=1 GROUP BY kind''', history_params):
                 first_round[row['kind']] = {'attempts': row['attempts'], 'correct': row['correct'],
                                              'accuracy': row['correct'] / row['attempts']}
+            delayed = db.execute(history + '''SELECT count(*) attempts,coalesce(sum(correct),0) correct
+                FROM history WHERE delayed_recall=1''', history_params).fetchone()
+            delayed_recall = dict(delayed) | {'accuracy': delayed['correct'] / delayed['attempts'] if delayed['attempts'] else None}
             daily_by_date = {row['date']: dict(row) for row in db.execute(history + '''SELECT
                 date(created_at,'unixepoch') date,count(*) attempts,sum(correct) correct
                 FROM history GROUP BY date ORDER BY date''', history_params)}
@@ -90,7 +93,7 @@ def register(app, user, owned_word, cancel_word_sessions):
                 JOIN decks d ON d.id=w.deck_id WHERE {scope} AND w.stage>=0
                 AND w.due_at>=? AND w.due_at<? GROUP BY date''', (*params, midnight, midnight + 7 * 86400))}
         return {'deck_id': deck_id, 'range': period, 'timezone': 'UTC', 'generated_at': now,
-                'since': start, 'decks': decks, 'totals': totals, 'mistakes': mistakes,
+                'since': start, 'decks': decks, 'totals': totals, 'mistakes': mistakes, 'delayed_recall': delayed_recall,
                 'first_round': first_round, 'daily': daily,
                 'new_passed_available': False,
                 'new_passed_note': '历史未记录过关时间及阶段变更，无法可靠推导每日新过关数',
@@ -130,6 +133,12 @@ def register(app, user, owned_word, cancel_word_sessions):
         with connect() as db:
             db.execute('BEGIN IMMEDIATE')
             owned_deck(db, did, account)
+            for session in db.execute('SELECT id,scope_deck_ids,status FROM study_sessions WHERE user_id=?', (account['id'],)).fetchall():
+                scope = json.loads(session['scope_deck_ids'])
+                if did in scope:
+                    db.execute('UPDATE study_sessions SET scope_deck_ids=?,status=? WHERE id=?',
+                               (json.dumps([key for key in scope if key != did]),
+                                'cancelled' if session['status'] == 'active' else session['status'], session['id']))
             ids = [r[0] for r in db.execute('SELECT id FROM words WHERE deck_id=?', (did,))]
             for wid in ids:
                 remove_word(db, wid)
@@ -153,7 +162,7 @@ def register(app, user, owned_word, cancel_word_sessions):
             cancel_word_sessions(db, [wid])
             db.execute('DELETE FROM attempts WHERE item_id IN (SELECT id FROM study_items WHERE word_id=?)', (wid,))
             db.execute('DELETE FROM study_items WHERE word_id=?', (wid,))
-            db.execute('UPDATE words SET stage=-1,due_at=NULL WHERE id=?', (wid,))
+            db.execute('UPDATE words SET stage=-1,due_at=NULL,last_seen_at=NULL,last_success_at=NULL,memory_interval=0 WHERE id=?', (wid,))
         return {'ok': True}
 
     @app.get('/api/words/{wid}/history')

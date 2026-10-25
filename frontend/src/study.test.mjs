@@ -22,7 +22,7 @@ globalThis.window = { speechSynthesis: {} }
 const spoken = []
 globalThis.speechSynthesis = { cancel() {}, speak: value => spoken.push(value.text) }
 globalThis.SpeechSynthesisUtterance = class { constructor(text) { this.text = text } }
-const state = await import(moduleUrl(`const onMounted = () => {}; const onUnmounted = () => {};\n${script}\nexport { session, item, answer, answered, content, busy, cooldownSeconds, submit, reveal, continueStudy, studyEnter, editingExample, resetFluency, key, beforeInput, nativeInput, report, reportWords, answerInput, speak, clearAudio, resumeStudy, activeStudies, reviewDeckIds, reviewCounts, selectedReviewCount, refresh, start, deckProgress, leaveStudy, pendingReport, summary, error };`))
+const state = await import(moduleUrl(`const onMounted = () => {}; const onUnmounted = () => {};\n${script}\nexport { session, item, answer, answered, content, busy, cooldownSeconds, submit, reveal, continueStudy, studyEnter, editingExample, resetFluency, key, beforeInput, nativeInput, report, reportWords, answerInput, speak, clearAudio, resumeStudy, activeStudies, reviewDeckIds, reviewCounts, selectedReviewCount, refresh, start, deckProgress, leaveStudy, pendingReport, summary, error, effortHard, includeUnlearned, additionalDueCount };`))
 globalThis.document = { body: {}, activeElement: null }
 state.session.value = 1
 state.item.value = { id: 2 }
@@ -328,10 +328,10 @@ assert.equal(state.session.value, 101)
 await state.resumeStudy(progressB)
 assert.equal(state.session.value, 102)
 await state.start()
-assert.deepEqual(selection, { deck_ids: [2] })
+assert.deepEqual(selection, { deck_ids: [2], include_unlearned: false })
 assert.equal(state.session.value, 102)
 assert.equal(state.activeStudies.value.length, 2)
-// 返回先结算再退出；巩固未完成也可返回，失败保留学习页面。
+// 返回只暂停；答题早已保存，不结算、不推进轮次。
 assert.doesNotMatch(app, /中断本轮|提前完结|roundAction\(/)
 for (const mode of ['answer', 'practice', 'empty', 'pending', 'report', 'complete', 'failure']) {
   state.session.value = 101
@@ -340,29 +340,50 @@ for (const mode of ['answer', 'practice', 'empty', 'pending', 'report', 'complet
   state.report.value = mode === 'report' ? { round_number: 3, words: [] } : null
   state.summary.value = mode === 'complete' ? { attempts: 2, correct: 2 } : null
   const calls = []
-  fetch = async (url, options) => {
+  fetch = async url => {
     calls.push(url)
-    if (url.endsWith('/round-action')) {
-      assert.deepEqual(JSON.parse(options.body), { action: 'finish', round_number: 3 })
-      return mode === 'failure' ? Response.json({ detail: '保存失败' }, { status: 500 }) : Response.json({ ok: true })
-    }
-    if (url.endsWith('/decks')) return Response.json([])
+    if (url.endsWith('/decks')) return mode === 'failure' ? Response.json({ detail: '加载失败' }, { status: 500 }) : Response.json([])
     if (url.endsWith('/reviews/due')) return Response.json({ count: 0, decks: [] })
     if (url.endsWith('/study/active')) return Response.json({ sessions: [] })
     throw new Error(`Unexpected URL: ${url}`)
   }
   await state.leaveStudy()
-  const shouldFinish = ['answer', 'practice', 'empty', 'failure'].includes(mode)
-  assert.equal(calls.some(url => url.endsWith('/round-action')), shouldFinish)
-  if (shouldFinish) assert.ok(calls[0].endsWith('/round-action'))
+  assert.equal(calls.some(url => url.endsWith('/round-action')), false)
   if (mode === 'failure') {
     assert.equal(state.session.value, 101)
     assert.equal(state.item.value.id, 99)
-    assert.match(state.error.value, /保存失败/)
-    assert.equal(calls.length, 1)
+    assert.match(state.error.value, /加载失败/)
   } else {
     assert.equal(state.session.value, null)
     assert.equal(state.item.value, null)
   }
 }
+// 吃力由用户标记，不把打字慢直接判错；下一题重置。
+freshItem()
+let effortRequest
+fetch = async (url, options) => {
+  if (url.endsWith('/answer')) {
+    effortRequest = JSON.parse(options.body)
+    return Response.json({ word: 'word', correct: true })
+  }
+  return Response.json({ complete: false, item: { id: 3 }, additional_due_count: 12 })
+}
+state.effortHard.value = true; state.answer.value = 'word'
+await state.submit()
+assert.equal(effortRequest.effort, 'hard')
+assert.equal(state.content.value.correct, true)
+now += 3000; tick(); await state.continueStudy()
+assert.equal(state.effortHard.value, false)
+assert.equal(state.additionalDueCount.value, 12)
+freshItem()
+for (let i = 0; i < 3; i++) { state.key('w'); state.key('Backspace') }
+state.key('w'); await state.submit()
+assert.equal(effortRequest.effort, 'hard', '反复修改只标记吃力，不改拼写判分')
+freshItem()
+for (let i = 0; i < 3; i++) { state.key('w'); state.key('Backspace') }
+state.nativeInput({ inputType: 'insertFromPaste', data: 'word', target: { value: 'word', selectionStart: 4, selectionEnd: 4 } })
+state.answer.value = 'word'; await state.submit()
+assert.equal(effortRequest.effort, 'normal', '粘贴后输入信号不可用，不自动判吃力')
+assert.match(app, /任务队列固定/)
+assert.match(app, /不影响拼写判分/)
 console.log('study checks passed')

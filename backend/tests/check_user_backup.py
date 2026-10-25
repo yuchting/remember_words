@@ -29,9 +29,9 @@ class UserBackupTests(unittest.TestCase):
                 connection.execute('INSERT INTO decks VALUES(?,?,?,?,?)', (uid, uid, '词库', 100.0, 101.0))
                 connection.execute('''INSERT INTO words(id,deck_id,word,meaning,stage,due_at)
                     VALUES(?,?,?, ?,3,1000)''', (uid, uid, 'apple', '苹果'))
-                connection.execute('INSERT INTO study_sessions VALUES(?,?,?,?,?,?)', (uid, uid, uid, 'new', 'active', 1))
+                connection.execute('INSERT INTO study_sessions(id,user_id,deck_id,kind,status,round_number) VALUES(?,?,?,?,?,?)', (uid, uid, uid, 'new', 'active', 1))
                 connection.execute('INSERT INTO study_items(id,session_id,word_id,round_number,position,hint_used) VALUES(?,?,?,?,?,?)', (uid, uid, uid, 1, 0, 0))
-                connection.execute('INSERT INTO attempts VALUES(?,?,?,?,?)', (uid, uid, 'apple', 1, 102.0))
+                connection.execute('INSERT INTO attempts(id,item_id,answer,correct,created_at) VALUES(?,?,?,?,?)', (uid, uid, 'apple', 1, 102.0))
         self.uid = 10
         app = FastAPI()
         backup.register(app, lambda: {'id': self.uid}, self.hasher)

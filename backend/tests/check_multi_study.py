@@ -45,17 +45,18 @@ class MultiStudyChecks(unittest.TestCase):
         due = self.client.get('/api/reviews/due').json()
         self.assertEqual(due['count'], 5)
         selected = self.post('/api/reviews/study', {'deck_ids': [first, second, first]}).json()
-        self.assertEqual([s['deck_id'] for s in selected['sessions']], [first, second])
-        self.assertEqual([s['total'] for s in selected['sessions']], [1, 2])
-        self.assertEqual(self.post('/api/reviews/study', {'deck_ids': [first, second]}).json(), selected)
+        self.assertEqual([s['deck_id'] for s in selected['sessions']], [None])
+        self.assertEqual([s['total'] for s in selected['sessions']], [3])
+        self.assertEqual(self.post('/api/reviews/study', {'deck_ids': [first, second]}).status_code, 409)
         with database.connect() as db:
             self.assertIsNone(db.execute('SELECT id FROM study_sessions WHERE deck_id=?', (third,)).fetchone())
         self.assertEqual(self.client.get('/api/reviews/due').json()['count'], 2)
         with database.connect() as db:
             account = dict(db.execute("SELECT * FROM users WHERE username='alice'").fetchone())
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            ids = list(pool.map(lambda _: start_study(account, deck_ids=[first, second])['id'], range(8)))
-        self.assertEqual(set(ids), {selected['id']})
+        from fastapi import HTTPException
+        with self.assertRaises(HTTPException) as conflict:
+            start_study(account, deck_ids=[first, second])
+        self.assertEqual(conflict.exception.status_code, 409)
         for data in ({'deck_ids': []}, {'deck_ids': ['1']}, {'deck_ids': [True]}):
             self.assertEqual(self.post('/api/reviews/study', data).status_code, 422)
         self.assertEqual(self.post('/api/reviews/study', {'deck_ids': [third, 99999]}).status_code, 404)
@@ -66,7 +67,7 @@ class MultiStudyChecks(unittest.TestCase):
         first, second = self.make_deck(), self.make_deck()
         self.assertEqual(self.post('/api/reviews/study', {'deck_ids': [first]}).status_code, 409)
         sid = self.post(f'/api/decks/{first}/study').json()['id']
-        self.assertEqual(self.post('/api/reviews/study', {'deck_ids': [first]}).json()['id'], sid)
+        self.assertEqual(self.post('/api/reviews/study', {'deck_ids': [first]}).status_code, 409)
         self.assertEqual(self.post('/api/reviews/study', {'deck_ids': [second]}).status_code, 409)
 
     def test_legacy_review_resumes_without_overlap(self):
@@ -80,9 +81,7 @@ class MultiStudyChecks(unittest.TestCase):
         original = self.client.get(f'/api/study/{sid}/next').json()
         for did in (first, second):
             self.assertEqual(self.post(f'/api/decks/{did}/study').json()['id'], sid)
-        result = self.post('/api/reviews/study', {'deck_ids': [first, second]}).json()
-        self.assertEqual([s['id'] for s in result['sessions']], [sid])
-        self.assertIsNone(result['sessions'][0]['deck_id'])
+        self.assertEqual(self.post('/api/reviews/study', {'deck_ids': [first, second]}).status_code, 409)
         self.assertEqual(self.client.get(f'/api/study/{sid}/next').json(), original)
         self.assertNotEqual(self.post(f'/api/decks/{third}/study').json()['id'], sid)
 
@@ -126,7 +125,7 @@ class MultiStudyChecks(unittest.TestCase):
             with patch.object(database, 'DB_PATH', path):
                 database.initialize()
             with sqlite3.connect(path) as db:
-                self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 3)
+                self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 4)
 
     def test_migration_preserves_every_row_and_position(self):
         for schema in (database.BASE_SCHEMA, database.SCHEMA_V2):
@@ -135,7 +134,7 @@ class MultiStudyChecks(unittest.TestCase):
                 db.execute("INSERT INTO users VALUES(1,'old','hash','parent',1)")
                 db.executemany('INSERT INTO decks VALUES(?,1,?,0,0)', [(1, 'one'), (2, 'two')])
                 db.executemany("INSERT INTO words(id,deck_id,word,meaning,stage,due_at) VALUES(?,?,'word','词',0,0)", [(1, 1), (2, 2)])
-                db.execute("INSERT INTO study_sessions VALUES(1,1,NULL,'review','active',2)")
+                db.execute("INSERT INTO study_sessions(id,user_id,deck_id,kind,status,round_number) VALUES(1,1,NULL,'review','active',2)")
                 db.execute('INSERT INTO study_items(id,session_id,word_id,round_number,position,hint_used) VALUES(1,1,1,1,0,1)')
                 db.execute("INSERT INTO attempts VALUES(1,1,'wrong',0,1)")
                 db.execute('INSERT INTO study_items(id,session_id,word_id,round_number,position,hint_used) VALUES(2,1,2,2,0,1)')
@@ -146,16 +145,16 @@ class MultiStudyChecks(unittest.TestCase):
                 items = db.execute('SELECT id,session_id,word_id,round_number,position,hint_used FROM study_items').fetchall()
                 database.migrate(db)
                 database.migrate(db)
-                self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 3)
+                self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 4)
                 for table in tables:
-                    self.assertEqual(db.execute(f'SELECT * FROM {table}').fetchall(), before[table])
+                    self.assertEqual([row[:len(before[table][0])] for row in db.execute(f'SELECT * FROM {table}')], before[table])
                 self.assertEqual(db.execute('SELECT id,session_id,word_id,round_number,position,hint_used FROM study_items').fetchall(), items)
                 self.assertEqual(db.execute('SELECT practice_pending FROM study_items WHERE id=2').fetchone()[0], int(schema == database.SCHEMA_V2))
-                db.execute("INSERT INTO study_sessions VALUES(2,1,1,'new','active',1)")
-                db.execute("INSERT INTO study_sessions VALUES(3,1,2,'new','active',1)")
+                db.execute("INSERT INTO study_sessions(id,user_id,deck_id,kind,status,round_number) VALUES(2,1,1,'new','active',1)")
+                db.execute("INSERT INTO study_sessions(id,user_id,deck_id,kind,status,round_number) VALUES(3,1,2,'new','active',1)")
                 for deck in ('1', 'NULL'):
                     with self.assertRaises(sqlite3.IntegrityError):
-                        db.execute(f"INSERT INTO study_sessions VALUES(4,1,{deck},'review','active',1)")
+                        db.execute(f"INSERT INTO study_sessions(id,user_id,deck_id,kind,status,round_number) VALUES(4,1,{deck},'review','active',1)")
 
 
 if __name__ == '__main__':

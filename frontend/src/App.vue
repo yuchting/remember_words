@@ -5,15 +5,19 @@ import StatisticsPanel from './StatisticsPanel.vue'
 
 type User = { id: number; username: string; role: string; is_active?: boolean | number }
 type Deck = { id: number; name: string; total: number; due: number; learned?: number; started_at?: string }
-type Progress = { id: number; round_number: number; total: number; answered: number; correct: number; remaining: number; deck_id?: number | null; deck_name?: string; kind?: string }
+type Progress = { id: number; round_number: number; total: number; answered: number; correct: number; remaining: number; deck_id?: number | null; deck_name?: string; kind?: string; deck_ids?: number[] }
 type Item = Progress & { meaning: string; practice_pending?: boolean }
 const activeStudies = ref<Progress[]>([])
 const reviewDeckIds = ref<number[]>([])
+const includeUnlearned = ref(false)
+const effortHard = ref(false)
+const additionalDueCount = ref(0)
 const reviewCounts = ref<Record<number, number>>({})
 const selectedReviewCount = computed(() => reviewDeckIds.value.reduce((sum, id) => sum + (reviewCounts.value[id] ?? 0), 0))
-function deckProgress(id: number) { return activeStudies.value.find(progress => progress.deck_id === id) }
+const selectedUnlearnedCount = computed(() => decks.value.filter(deck => reviewDeckIds.value.includes(deck.id)).reduce((sum, deck) => sum + Math.max(0, deck.total - (deck.learned ?? 0)), 0))
+function deckProgress(id: number) { return activeStudies.value.find(progress => progress.deck_id === id || progress.deck_ids?.includes(id)) }
 type Content = { practice_pending?: boolean; practice?: boolean; spelling_correct?: boolean; word: string; meaning: string; example?: string; example_translation?: string; audio?: string; phonetic?: string; correct?: boolean; complete?: boolean; word_id?: number; definitions?: string[] }
-type Summary = { attempts: number; correct: number }
+type Summary = { attempts: number; correct: number; delayed_recall?: { attempts: number; correct: number; accuracy: number | null } }
 type ImportWord = { word: string; meaning: string; example?: string; example_translation?: string }
 type Preview = { items: ImportWord[]; duplicates: { word: string; indices: number[] }[] }
 type Sheet = { name: string; items: ImportWord[] }
@@ -88,8 +92,12 @@ const answered = ref(false)
 let lastInputAt = 0
 let fluent = false
 let inputCount = 0
+let corrections = 0
+let inputSignalValid = true
+function invalidateInputSignal() { fluent = false; inputSignalValid = false }
 function resetFluency() {
   lastInputAt = performance.now(); fluent = !item.value?.practice_pending; inputCount = 0
+  effortHard.value = false; corrections = 0; inputSignalValid = true
 }
 function trackInput(insertion: boolean) {
   const now = performance.now()
@@ -99,10 +107,13 @@ function trackInput(insertion: boolean) {
 function beforeInput(event: Event) {
   const input = event.target as HTMLInputElement
   if (input.selectionStart !== input.value.length || input.selectionEnd !== input.value.length) fluent = false
+  if (input.selectionStart !== input.selectionEnd) corrections++
 }
 function nativeInput(event: Event) {
   const e = event as InputEvent
   const input = event.target as HTMLInputElement
+  if (e.isComposing || e.inputType === 'insertFromPaste' || e.inputType === 'insertFromDrop' || (e.data && [...e.data].length > 1)) inputSignalValid = false
+  if (e.inputType?.startsWith('delete')) corrections++
   trackInput(e.inputType === 'insertText' && !e.isComposing && !!e.data && [...e.data].length === 1 &&
     input.selectionStart === input.value.length && input.selectionEnd === input.value.length)
 }
@@ -477,7 +488,7 @@ async function changeWord(word: ManagedWord, reset: boolean) {
 async function showHistory(word: ManagedWord) {
   await run(async () => { history.value = await api<History>(`/words/${word.id}/history`); historyWord.value = word.word })
 }
-type RoundReport = { round_number: number; correct: number; wrong: number; unanswered: number; words: { word_id: number; word: string; meaning: string; correct: boolean | number | null; evaluation: string; stage: number; due_at: number | null; next_round_probability: number }[] }
+type RoundReport = { round_number: number; correct: number; wrong: number; unanswered: number; words: { word_id: number; word: string; meaning: string; correct: boolean | number | null; evaluation: string; stage: number; due_at: number | null; needs_retry?: boolean; next_round_probability: number }[] }
 const report = ref<RoundReport | null>(null)
 const reportWords = computed(() => [...(report.value?.words ?? [])].sort((a, b) => {
   const rank = (word: RoundReport['words'][number]) => word.correct === null ? 1 : word.correct ? 2 : 0
@@ -488,12 +499,14 @@ async function loadNext() {
   clearCooldown()
   clearAudio()
   if (pendingReport.value !== null) {
+    additionalDueCount.value = (await api<{ additional_due_count?: number }>(`/study/${session.value}/next`)).additional_due_count ?? 0
     report.value = await api<RoundReport>(`/study/${session.value}/rounds/${pendingReport.value}`)
     pendingReport.value = null
     return
   }
   report.value = null
-  const data = await api<{ complete: boolean; item?: Item; summary?: Summary }>(`/study/${session.value}/next`)
+  const data = await api<{ complete: boolean; item?: Item; summary?: Summary; additional_due_count?: number }>(`/study/${session.value}/next`)
+  additionalDueCount.value = data.additional_due_count ?? 0
   item.value = data.item ?? null; summary.value = data.complete ? (data.summary ?? { attempts: 0, correct: 0 }) : null
   content.value = null; answer.value = ''; answered.value = false; editingExample.value = false
   if (data.complete) await refresh()
@@ -503,20 +516,21 @@ async function showPreviousReport(progress: Progress) {
   if (progress.round_number < 2) return
   await run(async () => {
     session.value = progress.id
+    additionalDueCount.value = (await api<{ additional_due_count?: number }>(`/study/${session.value}/next`)).additional_due_count ?? 0
     report.value = await api<RoundReport>(`/study/${session.value}/rounds/${progress.round_number - 1}`)
     pendingReport.value = null
   })
 }
 async function resumeStudy(progress: Progress) {
   await run(async () => {
-    report.value = null; pendingReport.value = null
+    report.value = null; pendingReport.value = null; additionalDueCount.value = 0
     session.value = progress.id; summary.value = null; item.value = null; content.value = null
     await loadNext()
   })
 }
 async function start(deck?: Deck) {
   await run(async () => {
-    const data = await api<{ id: number }>(deck ? `/decks/${deck.id}/study` : '/reviews/study', 'POST', deck ? undefined : { deck_ids: reviewDeckIds.value })
+    const data = await api<{ id: number }>(deck ? `/decks/${deck.id}/study` : '/reviews/study', 'POST', deck ? undefined : { deck_ids: reviewDeckIds.value, include_unlearned: includeUnlearned.value })
     await refresh()
     report.value = null; pendingReport.value = null
     session.value = data.id; summary.value = null; item.value = null; content.value = null; await loadNext()
@@ -533,7 +547,7 @@ async function submit(skip = false) {
   if (answered.value || !item.value || (!skip && !answer.value.trim())) return
   const fast = fluent && inputCount > 0 && performance.now() - lastInputAt < 1000 && !skip && !content.value
   await run(async () => {
-    const result = await api<Content & { round_finished?: boolean; round_number?: number }>(`/study/${session.value}/items/${item.value?.id}/answer`, 'POST', { answer: answer.value.trim(), skip, practice: !!item.value?.practice_pending })
+    const result = await api<Content & { round_finished?: boolean; round_number?: number }>(`/study/${session.value}/items/${item.value?.id}/answer`, 'POST', { answer: answer.value.trim(), skip, practice: !!item.value?.practice_pending, effort: effortHard.value || (inputSignalValid && corrections >= 3) ? 'hard' : 'normal' })
     content.value = result
     if (result.round_finished) pendingReport.value = result.round_number!
     answered.value = true
@@ -570,6 +584,7 @@ function key(value: string) {
   const start = input?.selectionStart ?? answer.value.length
   const end = input?.selectionEnd ?? start
   const from = value === 'Backspace' && start === end ? Math.max(0, start - 1) : start
+  if (value === 'Backspace' || start !== end) corrections++
   trackInput(value !== 'Backspace' && start === end && end === answer.value.length)
   answer.value = answer.value.slice(0, from) + (value === 'Backspace' ? '' : value) + answer.value.slice(end)
   nextTick(() => { input?.focus(); const position = from + (value === 'Backspace' ? 0 : value.length); input?.setSelectionRange(position, position) })
@@ -652,19 +667,18 @@ async function leaveStudy() {
   clearCooldown()
   clearAudio()
   await run(async () => {
-    if (session.value && item.value && !report.value && pendingReport.value === null) {
-      await api(`/study/${session.value}/round-action`, 'POST', { action: 'finish', round_number: item.value.round_number })
-    }
     await refresh()
-    session.value = null; item.value = null; content.value = null; summary.value = null; report.value = null; pendingReport.value = null
+    session.value = null; item.value = null; content.value = null; summary.value = null; report.value = null; pendingReport.value = null; additionalDueCount.value = 0
   })
 }
 onUnmounted(() => {
   window.removeEventListener('keydown', studyEnter)
+  window.removeEventListener('blur', invalidateInputSignal)
   clearCooldown(); clearAudio()
 })
 onMounted(async () => {
   window.addEventListener('keydown', studyEnter)
+  window.addEventListener('blur', invalidateInputSignal)
   try { user.value = await api<User>('/auth/me'); await refresh() }
   catch (cause) { if (user.value) error.value = cause instanceof Error ? cause.message : '加载失败' }
   finally { ready.value = true }
@@ -687,11 +701,13 @@ onMounted(async () => {
     </main>
     <main v-else-if="session" class="study-layout">
       <div class="section-heading"><button class="text-button" :disabled="busy" @click="leaveStudy">← 返回词库</button><span class="muted">{{ summary ? '本轮完成' : `第 ${item?.round_number ?? 1} 轮 · 已完成 ${item?.answered ?? 0}/${item?.total ?? '…'} · 剩余 ${item?.remaining ?? '…'} 词` }}</span></div>
-      <section v-if="report" class="panel"><h1>第 {{ report.round_number }} 轮报告</h1><p>正确 {{ report.correct }} · 错误 {{ report.wrong }} · 未答 {{ report.unanswered }}（不计分）</p><p class="fine">下一轮入选率按规则计算，不是记忆概率。阶段不是精确记忆分数。</p><div class="table-scroll"><table><caption class="sr-only">本轮单词结果，错词优先</caption><thead><tr><th scope="col">单词</th><th scope="col">释义</th><th scope="col">结果</th><th scope="col">下一轮入选率</th><th scope="col">记忆阶段</th></tr></thead><tbody><tr v-for="word in reportWords" :key="word.word_id" :class="{ 'report-wrong': word.correct !== null && !word.correct }"><th scope="row" lang="en">{{ word.word }}</th><td>{{ word.meaning }}</td><td>{{ word.evaluation }}</td><td>{{ word.next_round_probability }}%</td><td>{{ word.stage < 0 ? '未学' : word.stage }}</td></tr></tbody></table></div><button :disabled="busy" @click="run(loadNext)">继续</button></section>
-      <section v-else-if="summary" class="panel result-panel"><span class="result-mark">✓</span><p class="eyebrow">每次回忆，都算进步</p><h1>这一轮，完成了！</h1><div class="result-stats"><div><strong>{{ summary.attempts }}</strong><span>回答次数</span></div><div><strong>{{ summary.correct }}</strong><span>正确次数</span></div><div><strong>{{ summary.attempts ? Math.round(summary.correct / summary.attempts * 100) : 0 }}%</strong><span>正确率</span></div></div><p class="muted">让记忆休息一下，到期后再来巩固。</p><button class="primary" :disabled="busy" @click="leaveStudy">回到词库</button></section>
+      <p class="fine">每次提交自动保存；返回只暂停，下次接着练。不限题量，今天练多少由你决定。输入速度不直接决定对错；反复修改会建议额外巩固，也可主动勾选回忆吃力。每词至多增加一次流畅巩固，不因打字慢无限循环。</p>
+      <p v-if="additionalDueCount" class="fine" role="status">所选词库另有 {{ additionalDueCount }} 个词现已建议复习，未加入本次固定队列；完成后可重新发起复习。</p>
+      <section v-if="report" class="panel"><h1>第 {{ report.round_number }} 轮报告</h1><p>正确 {{ report.correct }} · 错误 {{ report.wrong }} · 未答 {{ report.unanswered }}（不计分）</p><p class="fine">答对与流畅度分开记录；即时巩固不代表长期掌握。下轮再练由本次表现决定，下次建议时间还会考虑实际间隔。</p><div class="table-scroll"><table><caption class="sr-only">本轮单词结果，错词优先</caption><thead><tr><th scope="col">单词</th><th scope="col">释义</th><th scope="col">结果</th><th scope="col">下轮再练</th><th scope="col">记忆阶段</th></tr></thead><tbody><tr v-for="word in reportWords" :key="word.word_id" :class="{ 'report-wrong': word.correct !== null && !word.correct }"><th scope="row" lang="en">{{ word.word }}</th><td>{{ word.meaning }}</td><td>{{ word.evaluation }}</td><td>{{ (word.needs_retry ?? word.next_round_probability === 100) ? '是' : '否' }}</td><td>{{ word.stage < 0 ? '未学' : word.stage }}</td></tr></tbody></table></div><button :disabled="busy" @click="run(loadNext)">继续</button></section>
+      <section v-else-if="summary" class="panel result-panel"><span class="result-mark">✓</span><p class="eyebrow">每次回忆，都算进步</p><h1>这一轮，完成了！</h1><div class="result-stats"><div><strong>{{ summary.attempts }}</strong><span>回答次数</span></div><div><strong>{{ summary.correct }}</strong><span>正确次数</span></div><div><strong>{{ summary.attempts ? Math.round(summary.correct / summary.attempts * 100) : 0 }}%</strong><span>本次作答正确率</span></div></div><p v-if="summary.delayed_recall" class="fine">间隔回忆：{{ summary.delayed_recall.correct }}/{{ summary.delayed_recall.attempts }} 次独立答对；不含即时重输，不能等同于永久掌握。</p><p class="muted">本次练习已过关，不代表永久掌握。建议时间会按真实间隔与答题表现更新；之后可继续词库学习，或选择多个词库综合复习。</p><button class="primary" :disabled="busy" @click="leaveStudy">回到词库</button></section>
       <section v-else-if="item" class="panel study-panel">
         <p class="eyebrow">看中文 · 回忆英文</p><h1 class="meaning">{{ item.meaning }}</h1>
-        <form @submit.prevent="submit()"><label class="sr-only" for="answer">输入英文单词</label><input id="answer" ref="answerInput" v-model="answer" @beforeinput="beforeInput" @input="nativeInput" @paste="fluent = false" @cut="fluent = false" @drop="fluent = false" class="answer-input" lang="en" autocomplete="off" autocapitalize="none" :spellcheck="false" :disabled="busy || answered" placeholder="在这里输入英文" /><div class="study-actions"><button type="button" class="secondary" :disabled="busy || answered || !!content" @click="reveal">揭示答案</button><button type="button" class="secondary" :disabled="busy || answered" @click="submit(true)">不会，记一下</button><button class="primary" :disabled="busy || answered || !answer.trim()">提交答案</button></div></form>
+        <form @submit.prevent="submit()"><label class="sr-only" for="answer">输入英文单词</label><input id="answer" ref="answerInput" v-model="answer" @beforeinput="beforeInput" @input="nativeInput" @paste="invalidateInputSignal" @cut="invalidateInputSignal" @drop="invalidateInputSignal" class="answer-input" lang="en" autocomplete="off" autocapitalize="none" :spellcheck="false" :disabled="busy || answered" placeholder="在这里输入英文" /><label class="fine review-choice"><input v-model="effortHard" type="checkbox" :disabled="busy || answered || !!item.practice_pending" />这次回忆吃力，想再巩固一次（不影响拼写判分）</label><div class="study-actions"><button type="button" class="secondary" :disabled="busy || answered || !!content" @click="reveal">揭示答案</button><button type="button" class="secondary" :disabled="busy || answered" @click="submit(true)">不会，记一下</button><button class="primary" :disabled="busy || answered || !answer.trim()">提交答案</button></div></form>
         <div v-if="content" class="answer-card" aria-live="polite"><p v-if="answered" :class="['answer-status', content.correct ? 'correct' : 'incorrect']">{{ content.practice && content.spelling_correct ? '巩固拼写正确；首次成绩不变。' : content.correct ? '回答正确，记得不错！' : '还没记牢，继续后重输同一个词。' }}</p><div class="word-line"><h2>{{ content.word }}</h2><span class="muted">{{ content.phonetic }}</span><button class="audio-button" aria-label="播放单词发音" @click="speak(content.word, content.audio, content.word_id)">朗读单词</button></div><p>{{ content.meaning }}</p><ul v-if="content.definitions?.length" lang="en"><li v-for="definition in content.definitions.slice(0, 5)" :key="definition">{{ definition }}</li></ul><template v-if="content.example"><div class="example-line"><p lang="en">{{ content.example }}</p><button class="text-button" @click="speak(content.example!, undefined, content.word_id, 'example')">朗读例句</button></div><p class="muted">{{ content.example_translation }}</p></template><p v-else class="muted">暂无例句，可查词补全或手工添加。</p><div v-if="content.word_id" class="content-tools"><button class="secondary" :disabled="busy || editingExample" @click="enrich">查词补全</button><button class="text-button" :disabled="busy" @click="editExample">编辑例句与译文</button></div><form v-if="editingExample" class="example-editor" @submit.prevent="saveExample"><label>完整英文例句<textarea v-model="exampleDraft" lang="en" required maxlength="2000" rows="3" placeholder="填写完整英文句子"></textarea></label><label>完整中文译文<textarea v-model="translationDraft" required maxlength="2000" rows="3" placeholder="填写对应中文译文"></textarea></label><div class="content-tools"><button class="primary" :disabled="busy">保存例句与译文</button><button type="button" class="text-button" :disabled="busy" @click="editingExample = false">取消</button></div></form><p v-if="!answered" class="fine">看过答案也没关系，输入一遍加深印象，或选择“不会”。</p><button v-if="answered" ref="continueButton" class="primary wide" :disabled="busy || cooldownSeconds > 0" @click="continueStudy">{{ busy ? '正在加载…' : cooldownSeconds > 0 ? `继续（${cooldownSeconds}秒）` : '继续 →' }}</button></div>
         <div v-if="!answered" class="keyboard-wrap"><button class="text-button keyboard-toggle" :aria-expanded="keyboard" @click="keyboard = !keyboard">{{ keyboard ? '收起软键盘' : '展开软键盘' }}</button><div v-if="keyboard" class="keyboard" aria-label="英文软键盘"><div v-for="row in rows" :key="row" class="keyboard-row"><button v-for="letter in row" :key="letter" :disabled="busy" @mousedown.prevent @click="key(letter)">{{ letter }}</button></div><div class="keyboard-row"><button :disabled="busy" @mousedown.prevent @click="key('-')">-</button><button :disabled="busy" @mousedown.prevent @click="key('\'')">'</button><button class="space-key" :disabled="busy" @mousedown.prevent @click="key(' ')">空格</button><button class="delete-key" aria-label="删除一个字符" :disabled="busy" @mousedown.prevent @click="key('Backspace')">⌫</button></div></div></div>
       </section>
@@ -700,10 +716,10 @@ onMounted(async () => {
     <main v-else class="dashboard">
       <nav class="tabs" aria-label="主要导航"><button :class="{ active: page === 'decks' }" @click="page = 'decks'">我的词库</button><button :class="{ active: page === 'overall-statistics' }" @click="page = 'overall-statistics'">总体统计</button><button :class="{ active: page === 'import' }" @click="page = 'import'">导入词库</button><button :disabled="busy" :class="{ active: page === 'backup' }" @click="page = 'backup'">个人备份</button><button v-if="isParent" :class="{ active: page === 'family' }" @click="page = 'family'">家庭管理</button><button v-if="isParent" :disabled="busy" :class="{ active: page === 'speech' }" @click="openSpeech">云端朗读</button></nav>
       <template v-if="page === 'decks'">
-        <section v-for="progress in activeStudies" :key="progress.id" class="panel" aria-label="已保存的学习进度"><h2>{{ progress.deck_name || '旧版跨词库复习' }} · 第 {{ progress.round_number }} 轮</h2><p>本轮已完成 {{ progress.answered }}/{{ progress.total }} 词，剩余 {{ progress.remaining }} 词。{{ progress.round_number > 1 ? '本轮仅练上一轮未独立答对的词。' : '本轮覆盖本次学习的全部单词。' }}</p><p class="fine">每次提交自动保存；提示、不会和答错的词会进入下一轮，直到独立答对。</p><button :disabled="busy" @click="resumeStudy(progress)">继续学习</button><button v-if="progress.round_number > 1" :disabled="busy" @click="showPreviousReport(progress)">查看上一轮报告</button></section>
+        <section v-for="progress in activeStudies" :key="progress.id" class="panel" aria-label="已保存的学习进度"><h2>{{ progress.deck_name || '跨词库综合复习' }} · 第 {{ progress.round_number }} 轮</h2><p>本轮已提交 {{ progress.answered }}/{{ progress.total }} 词，剩余 {{ progress.remaining }} 词（待巩固题仍需重输）。{{ progress.round_number > 1 ? '本轮练习上轮未独立答对或需要额外巩固的词。' : '本轮覆盖本次学习的全部单词。' }}</p><p class="fine">每次提交自动保存，返回不会结算本轮，可分几天完成；提示、不会与答错不算独立回忆成功。</p><button :disabled="busy" @click="resumeStudy(progress)">继续学习</button><button v-if="progress.round_number > 1" :disabled="busy" @click="showPreviousReport(progress)">查看上一轮报告</button></section>
         <section class="welcome"><div><p class="eyebrow">把今天的一点，变成明天的更多</p><h1>你好，{{ user.username }}。</h1><p class="muted">不必一次记住所有，只要每天向前一点。</p><p class="fine">各词库独立保存轮次与进度；切换词库不会丢失已答记录。</p></div><div class="today-date">{{ new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' }) }}</div></section>
-        <section class="review-banner"><div><span class="eyebrow">今日复习</span><h2>{{ due ? `${due} 个单词，等你再见一面` : '今天的复习，已安排妥当' }}</h2><p>{{ due ? '趁记忆还在，给它一点巩固。' : '暂时没有到期单词，挑一个词库开始学习吧。' }}</p></div><button :disabled="busy || !selectedReviewCount" @click="start()">复习所选词库（{{ selectedReviewCount }} 词）</button></section>
-        <fieldset class="panel"><legend>选择到期复习词库</legend><p class="fine">仅纳入已独立过关且到期的单词；未学和尚未过关词不进入复习。已有批次从保存位置继续。</p><button class="text-button" :disabled="busy" @click="reviewDeckIds = decks.filter(deck => (reviewCounts[deck.id] ?? 0) > 0).map(deck => deck.id)">全选可复习词库</button><button class="text-button" :disabled="busy" @click="reviewDeckIds = []">取消全选</button><label v-for="deck in decks" :key="deck.id" class="review-choice"><input v-model="reviewDeckIds" type="checkbox" :value="deck.id" :disabled="busy || !(reviewCounts[deck.id] > 0)" />{{ deck.name }}（{{ reviewCounts[deck.id] ?? 0 }} 词可复习）</label></fieldset>
+        <section class="review-banner"><div><span class="eyebrow">跨词库综合复习</span><h2>{{ due ? `${due} 个单词，等你再见一面` : '今天的复习，已安排妥当' }}</h2><p>{{ due ? '趁记忆还在，给它一点巩固。' : '暂时没有到期单词，挑一个词库开始学习吧。' }}</p></div><button :disabled="busy || !reviewDeckIds.length || (!selectedReviewCount && !(includeUnlearned && selectedUnlearnedCount))" @click="start()">复习所选词库（{{ selectedReviewCount }} 词到期{{ includeUnlearned ? `，另含 ${selectedUnlearnedCount} 词未过关` : '' }}）</button></section>
+        <fieldset class="panel"><legend>选择综合复习范围</legend><p class="fine">按实际时间与历史表现筛选建议再练的词，不是全部重做。任务队列固定，可分 2～3 天暂停、恢复；期间新增到期词只提示，不悄悄追加。若所选词库已有其他活动任务，请先继续原任务。</p><label class="review-choice"><input v-model="includeUnlearned" type="checkbox" :disabled="busy" />包含未学／尚未过关的词（考前避免漏练）</label><button class="text-button" :disabled="busy" @click="reviewDeckIds = decks.map(deck => deck.id)">全选词库</button><button class="text-button" :disabled="busy" @click="reviewDeckIds = []">取消全选</button><label v-for="deck in decks" :key="deck.id" class="review-choice"><input v-model="reviewDeckIds" type="checkbox" :value="deck.id" :disabled="busy" />{{ deck.name }}（{{ reviewCounts[deck.id] ?? 0 }} 词可复习）</label></fieldset>
         <div class="section-heading"><h2>我的词库 <span class="count">{{ decks.length }}</span></h2><span class="muted">共 {{ totalWords }} 个单词</span></div>
         <div v-if="decks.length" class="deck-grid"><article v-for="(deck, index) in decks" :key="deck.id" class="panel deck-card"><span class="deck-icon" :class="`tone-${index % 3}`">{{ deck.name?.slice(0, 1) || '词' }}</span><h3>{{ deck.name || '未命名词库' }}</h3><p class="muted">{{ deck.total }} 个单词 <span class="dot">·</span> 已过关 {{ deck.learned ?? 0 }} 个 <span class="dot">·</span> {{ deck.due }} 个待复习</p><button class="secondary" :disabled="busy" @click="openStatistics(deck.id)">统计信息</button><button class="secondary" :disabled="busy" @click="openDeck(deck.id)">管理词库</button><p v-if="deckProgress(deck.id)" class="fine">第 {{ deckProgress(deck.id)!.round_number }} 轮 · 已答 {{ deckProgress(deck.id)!.answered }}/{{ deckProgress(deck.id)!.total }}</p><div class="deck-footer"><span class="fine">{{ deck.started_at ? '已开始学习' : '等待初次相遇' }}</span><button class="text-button" :disabled="busy || !deck.total" @click="start(deck)">{{ deck.started_at ? '继续学习' : '开始学习' }} →</button></div></article></div>
         <section v-else class="panel empty"><h3>第一本词库，从这里开始</h3><p class="muted">导入一份 JSON 单词表，开启你的记忆旅程。</p><button class="primary" @click="page = 'import'">导入词库</button></section>
@@ -786,7 +802,7 @@ onMounted(async () => {
         <h2>已过关 {{ statistics.percentage }}%</h2>
         <progress :value="statistics.passed" :max="statistics.total || 1" aria-label="词库已过关比例">{{ statistics.percentage }}%</progress>
         <div class="result-stats"><div><strong>{{ statistics.total }}</strong><span>全部单词</span></div><div><strong>{{ statistics.passed }}</strong><span>已过关</span></div><div><strong>{{ statistics.unlearned }}</strong><span>尚未过关</span></div><div><strong>{{ statistics.due }}</strong><span>到期待复习</span></div></div>
-        <p class="fine">已过关指阶段 0–5：至少独立答对并完成轮次结算；尚未过关指未学阶段 -1，包含尚未独立过关的词。到期词属于已过关词，需要继续巩固。百分比不是记忆概率，也不代表永久掌握。当前轮未结算的答题不改变此统计。</p>
+        <p class="fine">已过关表示已有独立答对记录，不代表永久掌握；尚未过关包含未学和未独立答对的词。每次提交即时保存记忆状态，不必等整轮结束。建议复习时间考虑真实间隔，阶段和百分比不是记忆概率。</p>
         <h2>记忆阶段分布</h2><ul><li v-for="stage in statistics.stages" :key="stage.stage">{{ stage.stage < 0 ? '未学 / 尚未过关' : `阶段 ${stage.stage}` }}：{{ stage.count }} 词</li></ul>
         <p v-if="!statistics.total">词库为空，暂无学习统计。</p>
         <h2>尚未过关的单词</h2><ul><li v-for="word in detail.words.filter(word => word.stage < 0)" :key="word.id">{{ word.word }} · {{ word.meaning }}</li></ul>
@@ -798,7 +814,7 @@ onMounted(async () => {
         <div class="content-tools"><button class="secondary" :disabled="busy" @click="exportDeck">导出 JSON</button><button class="text-button danger" :disabled="busy" @click="deleteDeck">删除词库</button></div>
         <p class="fine">修改或删除词条、重置进度会结束包含该词条的活动批次。</p>
         <form v-if="wordDraft" class="example-editor" @submit.prevent="saveWord"><h2>编辑 {{ wordDraft.word }}</h2><label>释义<textarea v-model="wordDraft.meaning" required maxlength="2000" :disabled="busy"></textarea></label><label>英文例句<textarea v-model="wordDraft.example" maxlength="2000" :disabled="busy"></textarea></label><label>中文译文<textarea v-model="wordDraft.example_translation" maxlength="2000" :disabled="busy"></textarea></label><div class="content-tools"><button class="primary" :disabled="busy || !wordDraft.meaning.trim()">保存词条</button><button type="button" class="text-button" :disabled="busy" @click="wordDraft = null">取消</button></div></form>
-        <section v-if="history" class="history-panel" aria-label="学习历史"><h2>{{ historyWord }} · 真实学习记录</h2><p>当前阶段：{{ history.stage }} · 下次复习：{{ dateTime(history.due_at) }}</p><ol class="stage-track"><li v-for="(interval, i) in history.intervals" :key="i" :class="{ current: i === history.stage }">阶段 {{ i }}<br>{{ intervalLabel(interval) }}</li></ol><p class="fine">阶段只表示复习间隔，不代表记忆概率；以下为真实答题时间线。</p><ol class="attempt-timeline"><li v-for="(attempt, i) in history.attempts" :key="i" :class="attempt.correct ? 'correct' : 'incorrect'"><strong>{{ attempt.correct ? '答对' : '答错' }}</strong> · {{ dateTime(attempt.created_at) }} · 第 {{ attempt.round_number }} 轮 · 输入：{{ attempt.answer || '（未输入）' }}</li></ol><p v-if="!history.attempts.length">暂无答题历史。</p><button class="text-button" @click="history = null">收起历史</button></section>
+        <section v-if="history" class="history-panel" aria-label="学习历史"><h2>{{ historyWord }} · 真实学习记录</h2><p>当前阶段：{{ history.stage }} · 下次复习：{{ dateTime(history.due_at) }}</p><ol class="stage-track"><li v-for="(interval, i) in history.intervals" :key="i" :class="{ current: i === history.stage }">阶段 {{ i }}<br>{{ intervalLabel(interval) }}</li></ol><p class="fine">阶段仅为兼容展示，固定间隔刻度不是实际排期；以下为真实答题时间线，下次建议时间按实际间隔与表现更新。</p><ol class="attempt-timeline"><li v-for="(attempt, i) in history.attempts" :key="i" :class="attempt.correct ? 'correct' : 'incorrect'"><strong>{{ attempt.correct ? '答对' : '答错' }}</strong> · {{ dateTime(attempt.created_at) }} · 第 {{ attempt.round_number }} 轮 · 输入：{{ attempt.answer || '（未输入）' }}</li></ol><p v-if="!history.attempts.length">暂无答题历史。</p><button class="text-button" @click="history = null">收起历史</button></section>
         <div v-if="detail.words.length" class="table-scroll"><table><caption>共 {{ detail.words.length }} 个词条</caption><thead><tr><th>英文</th><th>释义</th><th>例句 / 译文</th><th>学习进度</th><th>操作</th></tr></thead><tbody><tr v-for="word in detail.words" :key="word.id"><td>{{ word.word }}</td><td>{{ word.meaning }}</td><td>{{ word.example }}<br>{{ word.example_translation }}</td><td>阶段 {{ word.stage }}<br>答对 {{ word.correct }} / {{ word.attempts }}<br>下次：{{ dateTime(word.due_at) }}<br>最近：{{ dateTime(word.last_answer_at) }}</td><td><div class="word-tools"><button class="text-button" :disabled="busy" @click="wordDraft = { ...word }">编辑</button><button class="text-button" :disabled="busy" @click="showHistory(word)">历史趋势</button><button class="text-button danger" :disabled="busy" @click="changeWord(word, true)">重置进度</button><button class="text-button danger" :disabled="busy" @click="changeWord(word, false)">删除</button></div></td></tr></tbody></table></div><p v-else>词库为空。仍可改名、导出或删除。</p>
       </section>
       <template v-else-if="page === 'family' && isParent"><div class="section-heading"><div><p class="eyebrow">陪伴成长</p><h1>家庭管理</h1></div></div><section class="panel"><h2>创建孩子账号</h2><form class="child-form" @submit.prevent="createChild"><label>用户名<input v-model="childName" :disabled="busy" autocomplete="off" required maxlength="150" placeholder="孩子的用户名" /></label><label>初始密码<input v-model="childPassword" :disabled="busy" autocomplete="new-password" type="password" required placeholder="设置初始密码" /></label><button class="primary" :disabled="busy">创建账号</button></form></section><section class="panel family-list"><h2>孩子与账号</h2><p class="fine">重置密码后，请将新密码告知孩子。停用不会删除学习记录。</p><div v-for="child in users.filter(u => u.id !== user?.id)" :key="child.id" class="child-row"><div class="child-info"><strong>{{ child.username }}</strong><span :class="['badge', { inactive: (child.is_active === false || child.is_active === 0) }]">{{ (child.is_active === false || child.is_active === 0) ? '已停用' : '正常' }}</span></div><form class="reset-form" @submit.prevent="updateChild(child, true)"><label class="sr-only" :for="`password-${child.id}`">{{ child.username }} 的新密码</label><input :id="`password-${child.id}`" v-model="resetPasswords[child.id]" :disabled="busy" type="password" autocomplete="new-password" required placeholder="输入新密码" /><button class="secondary" :disabled="busy">重置密码</button></form><button class="text-button" :class="{ danger: child.is_active !== false && child.is_active !== 0 }" :disabled="busy" @click="updateChild(child, false)">{{ (child.is_active === false || child.is_active === 0) ? '启用账号' : '停用账号' }}</button></div><p v-if="!users.some(u => u.id !== user?.id)" class="muted">还没有孩子账号，在上方创建第一个。</p></section>

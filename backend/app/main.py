@@ -10,6 +10,7 @@ from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from datetime import datetime
 from urllib.parse import quote, urlsplit
+from typing import Literal
 
 import httpx
 from argon2 import PasswordHasher
@@ -347,7 +348,11 @@ def decks(account=Depends(user)):
 
 def session_details(db: sqlite3.Connection, session: sqlite3.Row) -> dict:
     progress = round_progress(db, session['id'], session['round_number'])
-    return dict(session) | progress | {'progress': progress}
+    scope = json.loads(db.execute('SELECT scope_deck_ids FROM study_sessions WHERE id=?', (session['id'],)).fetchone()[0])
+    if not scope:
+        scope = [row[0] for row in db.execute('''SELECT DISTINCT w.deck_id FROM study_items i
+            JOIN words w ON w.id=i.word_id WHERE i.session_id=? ORDER BY w.deck_id''', (session['id'],))]
+    return dict(session) | progress | {'progress': progress, 'deck_ids': scope}
 
 
 def active_sessions(db: sqlite3.Connection, user_id: int) -> list[dict]:
@@ -360,8 +365,9 @@ def active_for_deck(db: sqlite3.Connection, user_id: int, deck_id: int) -> sqlit
     return db.execute('''SELECT s.id FROM study_sessions s WHERE s.user_id=? AND s.status='active'
         AND (s.deck_id=? OR (s.deck_id IS NULL AND EXISTS (
             SELECT 1 FROM study_items i JOIN words w ON w.id=i.word_id
-            WHERE i.session_id=s.id AND w.deck_id=?))) ORDER BY s.id LIMIT 1''',
-        (user_id, deck_id, deck_id)).fetchone()
+            WHERE i.session_id=s.id AND w.deck_id=?) OR EXISTS (
+            SELECT 1 FROM json_each(s.scope_deck_ids) WHERE value=?))) ORDER BY s.id LIMIT 1''',
+        (user_id, deck_id, deck_id, deck_id)).fetchone()
 
 
 AVAILABLE_WORD = '''NOT EXISTS (
@@ -385,7 +391,7 @@ def due(account=Depends(user)):
         return {'count': sum(row['count'] for row in rows), 'decks': decks, 'sessions': sessions}
 
 
-def start_study(account: dict, deck_id: int | None = None, deck_ids: list[int] | None = None) -> dict:
+def start_study(account: dict, deck_id: int | None = None, deck_ids: list[int] | None = None, include_unlearned: bool = False) -> dict:
     with connect() as db:
         db.execute('BEGIN IMMEDIATE')
         owned = {row['id'] for row in db.execute('SELECT id FROM decks WHERE user_id=?', (account['id'],))}
@@ -394,20 +400,37 @@ def start_study(account: dict, deck_id: int | None = None, deck_ids: list[int] |
             raise HTTPException(404, '词库不存在')
         ids = []
         now = time.time()
+        if deck_id is None:
+            if any(active_for_deck(db, account['id'], did) for did in selected):
+                raise HTTPException(409, '所选词库存在活动任务，请先继续该任务')
+            if db.execute("SELECT 1 FROM study_sessions WHERE user_id=? AND deck_id IS NULL AND status='active'", (account['id'],)).fetchone():
+                raise HTTPException(409, '已有综合复习任务，请先继续该任务')
+            placeholders = ','.join('?' for _ in selected)
+            rows = db.execute(f'''SELECT w.id FROM words w WHERE w.deck_id IN ({placeholders})
+                AND ((w.stage>=0 AND w.due_at<=?) OR (? AND w.stage=-1)) ORDER BY w.id''',
+                (*selected, now, include_unlearned)).fetchall()
+            if not rows:
+                raise HTTPException(409, '没有待学习单词，请等待复习到期')
+            sid = db.execute('''INSERT INTO study_sessions(user_id,deck_id,kind,scope_deck_ids)
+                VALUES(?,NULL,'review',?)''', (account['id'], json.dumps(selected))).lastrowid
+            add_round(db, sid, 1, [row['id'] for row in rows])
+            sessions = {s['id']: s for s in active_sessions(db, account['id'])}
+            return {'id': sid, 'sessions': [sessions[sid]]}
         for did in selected:
             active = active_for_deck(db, account['id'], did)
             if active:
                 if active['id'] not in ids:
                     ids.append(active['id'])
                 continue
-            condition = 'w.stage=-1' if deck_id is not None else 'w.stage>=0 AND w.due_at<=?'
-            params = (did,) if deck_id is not None else (did, now)
+            condition = '(w.stage=-1 OR w.due_at<=?)'
+            params = (did, now)
             rows = db.execute(f'''SELECT w.id FROM words w WHERE w.deck_id=? AND {condition}
                 AND {AVAILABLE_WORD} ORDER BY w.id''', params).fetchall()
             if not rows:
                 continue
             sid = db.execute('INSERT INTO study_sessions(user_id,deck_id,kind) VALUES(?,?,?)',
                              (account['id'], did, 'new' if deck_id is not None else 'review')).lastrowid
+            db.execute('UPDATE study_sessions SET scope_deck_ids=? WHERE id=?', (json.dumps([did]), sid))
             add_round(db, sid, 1, [row['id'] for row in rows])
             if deck_id is not None:
                 db.execute('UPDATE decks SET started_at=COALESCE(started_at,?) WHERE id=?', (now, did))
@@ -425,11 +448,13 @@ def start_deck(deck_id: int, account=Depends(user)):
 
 class ReviewSelection(InputModel):
     deck_ids: list[int] = Field(min_length=1)
+    include_unlearned: bool = False
 
 
 @app.post('/api/reviews/study')
 def start_review(data: ReviewSelection | None = None, account=Depends(user)):
-    return start_study(account, deck_ids=data.deck_ids if data is not None else None)
+    return start_study(account, deck_ids=data.deck_ids if data is not None else None,
+                       include_unlearned=data.include_unlearned if data is not None else False)
 
 
 def owned_session(db, sid, account):
@@ -460,12 +485,22 @@ def active_study(account=Depends(user)):
 def next_question(sid: int, account=Depends(user)):
     with connect() as db:
         session = owned_session(db, sid, account)
+        scope = json.loads(session['scope_deck_ids'])
+        additional = db.execute('''SELECT count(*) FROM words w JOIN decks d ON d.id=w.deck_id
+            WHERE d.user_id=? AND w.deck_id IN (SELECT value FROM json_each(?))
+            AND w.stage>=0 AND w.due_at<=? AND NOT EXISTS
+            (SELECT 1 FROM study_items i WHERE i.session_id=? AND i.word_id=w.id)''',
+            (account['id'], json.dumps(scope), time.time(), sid)).fetchone()[0]
         item = current_item(db, sid)
         if not item:
             row = db.execute('''SELECT count(*) attempts,coalesce(sum(a.correct),0) correct FROM attempts a
                 JOIN study_items i ON i.id=a.item_id WHERE i.session_id=?''', (sid,)).fetchone()
-            return {'complete': True, 'summary': dict(row)}
-        return {'complete': False, 'item': {'id': item['id'], 'meaning': item['meaning'],
+            delayed = db.execute('''SELECT count(*) attempts,coalesce(sum(a.correct),0) correct
+                FROM attempts a JOIN study_items i ON i.id=a.item_id WHERE i.session_id=? AND a.delayed_recall=1''', (sid,)).fetchone()
+            summary = dict(row) | {'delayed_recall': dict(delayed) | {
+                'accuracy': delayed['correct'] / delayed['attempts'] if delayed['attempts'] else None}}
+            return {'complete': True, 'summary': summary, 'additional_due_count': additional}
+        return {'complete': False, 'additional_due_count': additional, 'item': {'id': item['id'], 'meaning': item['meaning'],
                 'round_number': session['round_number'], 'practice_pending': bool(item['practice_pending']),
                 **round_progress(db, sid, session['round_number'])}}
 
@@ -476,11 +511,12 @@ def round_report(sid: int, number: int, account=Depends(user)):
         session = owned_session(db, sid, account)
         if number < 1 or number > session['round_number'] or (session['status'] == 'active' and number == session['round_number']):
             raise HTTPException(409, '本轮尚未结算')
-        rows = db.execute('''SELECT w.id word_id,w.word,w.meaning,w.stage,w.due_at,a.correct,
+        rows = db.execute('''SELECT w.id word_id,w.word,w.meaning,w.stage,w.due_at,a.correct,coalesce(a.needs_retry,1) needs_retry,
             i.hint_used FROM study_items i JOIN words w ON w.id=i.word_id
             LEFT JOIN attempts a ON a.item_id=i.id WHERE i.session_id=? AND i.round_number=?
             ORDER BY i.position''', (sid, number)).fetchall()
-        words = [dict(row) | {'next_round_probability': 0 if row['correct'] == 1 else 100,
+        words = [dict(row) | {'needs_retry': bool(row['needs_retry']),
+                              'next_round_probability': 100 if row['needs_retry'] else 0,
                              'evaluation': '独立答对' if row['correct'] == 1 else ('未答，不计分' if row['correct'] is None else '未独立答对')}
                  for row in rows]
         return {'round_number': number, 'total': len(words),
@@ -513,6 +549,7 @@ class Answer(InputModel):
     answer: str = Field(default='', max_length=200)
     skip: bool = False
     practice: bool = False
+    effort: Literal['normal', 'hard'] = 'normal'
 
 
 def get_item(db, sid, iid):
@@ -529,6 +566,7 @@ def reveal(sid: int, iid: int, account=Depends(user)):
         if not item or item['id'] != iid:
             raise HTTPException(409, '题目已变化，请刷新')
         db.execute('UPDATE study_items SET hint_used=1 WHERE id=?', (iid,))
+        db.execute('UPDATE words SET last_seen_at=? WHERE id=?', (time.time(), item['word_id']))
         return content(item)
 
 
@@ -550,7 +588,7 @@ def answer(sid: int, iid: int, data: Answer, account=Depends(user)):
             raise HTTPException(409, '题目已变化，请刷新')
         if data.practice and not already:
             raise HTTPException(409, '当前题尚未进入巩固')
-        return submit(db, session, item, data.answer, data.skip, time.time(), data.practice)
+        return submit(db, session, item, data.answer, data.skip, time.time(), data.practice, data.effort)
 
 
 class ExamplePatch(InputModel):

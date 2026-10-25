@@ -8,6 +8,7 @@ type Statistics = {
   decks: (Counts & { id: number; name: string })[]
   mistakes: { word_id: number; word: string; meaning: string; deck_id: number; deck_name: string; attempts: number; wrong: number; error_rate: number; last_wrong_at: number | null }[]
   first_round: { new: Round; review: Round }
+  delayed_recall?: Round
   daily: { date: string; attempts: number; correct: number; new_passed: null }[]
   new_passed_available: false
   new_passed_note: string
@@ -124,11 +125,16 @@ onBeforeUnmount(() => { requestId++ })
             <caption>首轮表现</caption>
             <thead><tr><th scope="col">类型</th><th scope="col">作答</th><th scope="col">答对</th><th scope="col">正确率</th></tr></thead>
             <tbody>
-              <tr><th scope="row">新词</th><td>{{ data.first_round.new.attempts }}</td><td>{{ data.first_round.new.correct }}</td><td>{{ percent(data.first_round.new.accuracy) }}</td></tr>
+              <tr><th scope="row">词库学习</th><td>{{ data.first_round.new.attempts }}</td><td>{{ data.first_round.new.correct }}</td><td>{{ percent(data.first_round.new.accuracy) }}</td></tr>
               <tr><th scope="row">复习</th><td>{{ data.first_round.review.attempts }}</td><td>{{ data.first_round.review.correct }}</td><td>{{ percent(data.first_round.review.accuracy) }}</td></tr>
             </tbody>
           </table>
         </div>
+        <template v-if="data.delayed_recall">
+          <h4>间隔回忆表现</h4>
+          <p>检验 {{ data.delayed_recall.attempts }} 次 · 独立答对 {{ data.delayed_recall.correct }} 次 · 正确率 {{ percent(data.delayed_recall.accuracy) }}</p>
+          <p class="muted">距上次接触至少 10 分钟的检验单独统计；错误计为未独立答对；揭示答案后的提交与即时重输不计入。10 分钟是统计分界，不是长期掌握标准；旧记录缺少间隔信息时不推算。</p>
+        </template>
         <h4>每日作答 / 答对</h4>
         <p>{{ data.new_passed_note || '历史新增过关数不可用，不能从当前状态推算。' }}</p>
         <p v-if="!data.daily.some(day => day.attempts > 0)">此范围暂无作答记录</p>

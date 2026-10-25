@@ -33,6 +33,9 @@ class Word(Model):
     phonetic: str = Field(max_length=1000)
     stage: int = Field(ge=-1, le=5)
     due_at: Timestamp | None
+    memory_interval: float = Field(default=0, ge=0, le=2592000, allow_inf_nan=False)
+    last_seen_at: Timestamp | None = None
+    last_success_at: Timestamp | None = None
 
 
 class Deck(Model):
@@ -49,6 +52,7 @@ class Session(Model):
     kind: Literal['new', 'review']
     status: Literal['active', 'complete', 'cancelled']
     round_number: Number
+    scope_deck_ids: list[Key] = Field(default_factory=list, max_length=5000)
 
 
 class Item(Model):
@@ -56,7 +60,7 @@ class Item(Model):
     session_id: Key
     word_id: Key
     round_number: Number
-    position: int = Field(ge=0, le=4999)
+    position: int = Field(ge=0, le=100000)
     hint_used: Literal[0, 1]
 
 
@@ -66,6 +70,9 @@ class Attempt(Model):
     answer: str = Field(max_length=200)
     correct: Literal[0, 1]
     created_at: Timestamp
+    effort: Literal['normal', 'hard'] = 'normal'
+    needs_retry: Literal[0, 1] = 0
+    delayed_recall: Literal[0, 1] = 0
 
 
 class Backup(Model):
@@ -98,6 +105,11 @@ def encode(value):
 
 def validate(value):
     encode(value)
+    # Old v1 exports lack scheduling evidence; preserve history without inventing evidence.
+    value = json.loads(json.dumps(value))
+    for attempt in value.get('attempts', []):
+        if isinstance(attempt, dict):
+            attempt.setdefault('needs_retry', int(attempt.get('correct') == 0))
     try:
         backup = Backup.model_validate(value)
     except ValidationError:
@@ -136,10 +148,24 @@ def validate(value):
         if len(active_decks) != len(set(active_decks)):
             raise ValueError('同一词库存在多个活动批次')
         for session in sessions.values():
+            if any(did not in decks for did in session.scope_deck_ids):
+                raise ValueError('批次范围词库不存在')
             if session.deck_id is not None and session.deck_id not in decks:
                 raise ValueError('批次词库不存在')
             if session.kind == 'new' and session.deck_id is None and session.status == 'active':
                 raise ValueError('活动学习批次缺少词库')
+        occupied = set()
+        for session in sessions.values():
+            if session.status != 'active':
+                continue
+            scope = set(session.scope_deck_ids)
+            if session.deck_id is not None:
+                scope.add(session.deck_id)
+            scope.update(owners[item.word_id] for item in backup.study_items
+                         if item.session_id == session.id and item.word_id in owners)
+            if occupied & scope:
+                raise ValueError('活动批次词库范围重叠')
+            occupied.update(scope)
         items = index(backup.study_items)
         positions, round_words = set(), set()
         for item in items.values():
@@ -150,6 +176,8 @@ def validate(value):
                 raise ValueError('题目轮次超出批次')
             if session.deck_id is not None and owners[item.word_id] != session.deck_id:
                 raise ValueError('题目不属于批次词库')
+            if session.scope_deck_ids and owners[item.word_id] not in session.scope_deck_ids:
+                raise ValueError('题目不属于批次选择范围')
             position = (item.session_id, item.round_number, item.position)
             word_key = (item.session_id, item.round_number, item.word_id)
             if position in positions or word_key in round_words:
@@ -165,8 +193,8 @@ def validate(value):
         # Literal compares bool and int equally; reject bool explicitly at this boundary.
         if type(value['version']) is not int or any(
             type(row[field]) is not int
-            for key, field in [('study_items', 'hint_used'), ('attempts', 'correct')]
-            for row in value[key]
+            for key, field in [('study_items', 'hint_used'), ('attempts', 'correct'), ('attempts', 'needs_retry'), ('attempts', 'delayed_recall')]
+            for row in value[key] if field in row
         ):
             raise ValueError('标记必须为整数')
     except ValueError as exc:
@@ -176,10 +204,10 @@ def validate(value):
 
 FIELDS = {
     'decks': ('id', 'name', 'created_at', 'started_at'),
-    'words': ('id', 'word', 'meaning', 'example', 'example_translation', 'audio', 'phonetic', 'stage', 'due_at'),
-    'study_sessions': ('id', 'deck_id', 'kind', 'status', 'round_number'),
+    'words': ('id', 'word', 'meaning', 'example', 'example_translation', 'audio', 'phonetic', 'stage', 'due_at', 'last_seen_at', 'last_success_at', 'memory_interval'),
+    'study_sessions': ('id', 'deck_id', 'kind', 'status', 'round_number', 'scope_deck_ids'),
     'study_items': ('id', 'session_id', 'word_id', 'round_number', 'position', 'hint_used'),
-    'attempts': ('id', 'item_id', 'answer', 'correct', 'created_at'),
+    'attempts': ('id', 'item_id', 'answer', 'correct', 'created_at', 'effort', 'needs_retry', 'delayed_recall'),
 }
 
 
@@ -193,6 +221,8 @@ def snapshot(connection, uid):
         deck['words'] = rows('words', 'SELECT * FROM words WHERE deck_id=? ORDER BY id', (deck['id'],))
         words.extend(deck['words'])
     sessions = rows('study_sessions', 'SELECT * FROM study_sessions WHERE user_id=? ORDER BY id', (uid,))
+    for session in sessions:
+        session['scope_deck_ids'] = json.loads(session['scope_deck_ids'])
     items = rows('study_items', '''SELECT i.* FROM study_items i JOIN study_sessions s ON s.id=i.session_id
         WHERE s.user_id=? ORDER BY i.id''', (uid,))
     attempts = rows('attempts', '''SELECT a.* FROM attempts a JOIN study_items i ON i.id=a.item_id
@@ -202,6 +232,9 @@ def snapshot(connection, uid):
     for name, group in groups.items():
         for row in group:
             row['id'] = maps[name][row['id']]
+            if name == 'study_sessions':
+                # Deleted decks may remain in historical scope; omit stale references.
+                row['scope_deck_ids'] = [maps['decks'][did] for did in row['scope_deck_ids'] if did in maps['decks']]
             for field, target in [('deck_id', 'decks'), ('session_id', 'study_sessions'), ('word_id', 'words'), ('item_id', 'study_items')]:
                 if field in row and row[field] is not None:
                     if row[field] not in maps[target]:
@@ -247,6 +280,8 @@ def replace(connection, uid, backup):
     def insert(table, row, extra=None):
         fields = {key: value for key, value in row.items() if key not in ('id', 'words')}
         fields.update(extra or {})
+        if table == 'study_sessions':
+            fields['scope_deck_ids'] = json.dumps([maps['decks'][did] for did in row['scope_deck_ids']])
         cursor = connection.execute(f'INSERT INTO {table} ({",".join(fields)}) VALUES ({",".join("?" for _ in fields)})', tuple(fields.values()))
         maps[table][row['id']] = cursor.lastrowid
         return cursor.lastrowid

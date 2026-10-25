@@ -28,6 +28,7 @@ const empty = () => ({
     new: { attempts: 0, correct: 0, accuracy: null },
     review: { attempts: 0, correct: 0, accuracy: null },
   },
+  delayed_recall: { attempts: 0, correct: 0, accuracy: null },
   new_passed_available: false,
   new_passed_note: '历史新增过关数不可用',
 })
@@ -48,6 +49,9 @@ assert.equal(state.ratio(0, state.data.value.totals.total), 0)
 assert.equal(state.percent(state.ratio(0, 0)), '0.0%')
 assert.equal(state.percent(state.data.value.first_round.new.accuracy), '—')
 assert.equal(state.percent(state.data.value.first_round.review.accuracy), '—')
+assert.equal(state.percent(state.data.value.delayed_recall.accuracy), '—')
+assert.match(component, /间隔回忆表现/)
+assert.match(component, /旧记录缺少间隔信息时不推算/)
 
 state.range.value = '30'
 state.deckId.value = '12'

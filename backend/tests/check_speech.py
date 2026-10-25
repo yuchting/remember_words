@@ -30,7 +30,7 @@ class SpeechTests(unittest.TestCase):
             conn.execute("INSERT INTO users VALUES(1,'parent','hash','parent',1)")
             conn.execute("INSERT INTO decks VALUES(1,1,'deck',0,NULL)")
             conn.execute("INSERT INTO words(id,deck_id,word,meaning,example) VALUES(1,1,'apple','苹果','An apple.')")
-            conn.execute("INSERT INTO study_sessions VALUES(1,1,1,'new','active',1)")
+            conn.execute("INSERT INTO study_sessions(id,user_id,deck_id,kind,status,round_number) VALUES(1,1,1,'new','active',1)")
             conn.execute('INSERT INTO study_items(id,session_id,word_id,round_number,position) VALUES(1,1,1,1,0)')
 
     def tearDown(self):

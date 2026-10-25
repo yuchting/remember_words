@@ -58,7 +58,25 @@ CREATE UNIQUE INDEX active_study ON study_sessions(user_id,deck_id) WHERE status
 CREATE UNIQUE INDEX active_study_legacy ON study_sessions(user_id) WHERE status='active' AND deck_id IS NULL;
 PRAGMA user_version=3;
 '''
-SCHEMA = SCHEMA_V2 + ACTIVE_INDEXES
+SCHEMA_V3 = SCHEMA_V2 + ACTIVE_INDEXES
+TIME_SCHEDULING = '''
+ALTER TABLE words ADD COLUMN memory_interval REAL NOT NULL DEFAULT 0 CHECK(memory_interval>=0);
+ALTER TABLE words ADD COLUMN last_seen_at REAL;
+ALTER TABLE words ADD COLUMN last_success_at REAL;
+ALTER TABLE study_sessions ADD COLUMN scope_deck_ids TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE attempts ADD COLUMN effort TEXT NOT NULL DEFAULT 'normal' CHECK(effort IN ('normal','hard'));
+ALTER TABLE attempts ADD COLUMN delayed_recall INTEGER NOT NULL DEFAULT 0 CHECK(delayed_recall IN (0,1));
+ALTER TABLE attempts ADD COLUMN needs_retry INTEGER NOT NULL DEFAULT 0 CHECK(needs_retry IN (0,1));
+UPDATE attempts SET needs_retry=1 WHERE correct=0;
+UPDATE words SET last_seen_at=(SELECT max(a.created_at) FROM attempts a JOIN study_items i ON i.id=a.item_id WHERE i.word_id=words.id),
+ last_success_at=(SELECT max(a.created_at) FROM attempts a JOIN study_items i ON i.id=a.item_id WHERE i.word_id=words.id AND a.correct=1);
+UPDATE words SET memory_interval=CASE stage WHEN 0 THEN 600 WHEN 1 THEN 86400 WHEN 2 THEN 259200 WHEN 3 THEN 604800 WHEN 4 THEN 1209600 WHEN 5 THEN 2592000 ELSE 0 END;
+UPDATE study_sessions SET scope_deck_ids=json_array(deck_id) WHERE deck_id IS NOT NULL;
+UPDATE study_sessions SET scope_deck_ids=coalesce((SELECT json_group_array(deck_id) FROM
+ (SELECT DISTINCT w.deck_id FROM study_items i JOIN words w ON w.id=i.word_id WHERE i.session_id=study_sessions.id)), '[]') WHERE deck_id IS NULL;
+PRAGMA user_version=4;
+'''
+SCHEMA = SCHEMA_V3 + TIME_SCHEDULING
 
 
 def migrate(db: sqlite3.Connection) -> None:
@@ -67,6 +85,10 @@ def migrate(db: sqlite3.Connection) -> None:
         db.execute('PRAGMA user_version=2')
     if db.execute('PRAGMA user_version').fetchone()[0] == 2:
         for statement in ACTIVE_INDEXES.split(';'):
+            if statement.strip():
+                db.execute(statement)
+    if db.execute('PRAGMA user_version').fetchone()[0] == 3:
+        for statement in TIME_SCHEDULING.split(';'):
             if statement.strip():
                 db.execute(statement)
 
@@ -93,8 +115,8 @@ def initialize():
         version = db.execute('PRAGMA user_version').fetchone()[0]
         if version == 0:
             db.executescript(SCHEMA)
-        elif version in (1, 2):
+        elif version in (1, 2, 3):
             db.execute('BEGIN IMMEDIATE')
             migrate(db)
-        elif version != 3:
+        elif version != 4:
             raise ValueError('不支持的数据库版本')
