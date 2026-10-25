@@ -53,7 +53,7 @@ class CoreChecks(unittest.TestCase):
         self.assertEqual(self.post('/api/admin/users', {'username': 'x', 'password': 'password123'}).status_code, 403)
         self.assertEqual(self.client.post('/api/reviews/study').status_code, 403)
 
-    def test_round_interrupt_finish_report(self):
+    def test_return_finishes_answered_round_and_keeps_records(self):
         deck = self.make_deck()
         sid = self.post(f'/api/decks/{deck}/study').json()['id']
         item = self.client.get(f'/api/study/{sid}/next').json()['item']
@@ -62,10 +62,9 @@ class CoreChecks(unittest.TestCase):
         with connect() as db:
             self.assertEqual([r[0] for r in db.execute('SELECT stage FROM words')], [-1, -1])
         self.assertEqual(self.client.get(f'/api/study/{sid}/rounds/1').status_code, 409)
-        self.assertEqual(self.post(f'/api/study/{sid}/round-action', {'action': 'interrupt', 'round_number': 1}).status_code, 200)
-        restored = self.client.get(f'/api/study/{sid}/next').json()['item']
-        self.assertEqual((restored['id'], restored['answered']), (item['id'], 0))
-        self.post(f'/api/study/{sid}/items/{item["id"]}/answer', {'answer': word})
+        self.assertEqual(self.post(f'/api/study/{sid}/round-action', {'action': 'interrupt', 'round_number': 1}).status_code, 422)
+        with connect() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM attempts').fetchone()[0], 1)
         self.assertEqual(self.post(f'/api/study/{sid}/round-action', {'action': 'finish', 'round_number': 1}).status_code, 200)
         report = self.client.get(f'/api/study/{sid}/rounds/1').json()
         self.assertEqual((report['correct'], report['wrong'], report['unanswered']), (1, 0, 1))
@@ -76,11 +75,32 @@ class CoreChecks(unittest.TestCase):
         with connect() as db:
             self.assertEqual(sorted(r[0] for r in db.execute('SELECT stage FROM words')), [-1, 0])
         self.post(f'/api/study/{sid}/items/{next_item["id"]}/reveal')
-        self.post(f'/api/study/{sid}/round-action', {'action': 'interrupt', 'round_number': 2})
+        self.assertEqual(self.post(f'/api/study/{sid}/round-action', {'action': 'finish', 'round_number': 2}).status_code, 200)
+        unchanged = self.client.get(f'/api/study/{sid}/next').json()['item']
+        self.assertEqual(unchanged['round_number'], 2, '未答题返回不生成空轮次')
         with connect() as db:
-            self.assertEqual(db.execute('SELECT hint_used FROM study_items WHERE id=?', (next_item['id'],)).fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT hint_used FROM study_items WHERE id=?', (next_item['id'],)).fetchone()[0], 1)
         self.login('bob')
         self.assertEqual(self.client.get(f'/api/study/{sid}/rounds/1').status_code, 404)
+
+    def test_return_during_practice_preserves_wrong_answer(self):
+        deck = self.make_deck()
+        sid = self.post(f'/api/decks/{deck}/study').json()['id']
+        item = self.client.get(f'/api/study/{sid}/next').json()['item']
+        base = f'/api/study/{sid}/items/{item["id"]}'
+        self.post(base + '/reveal')
+        self.post(base + '/answer', {'skip': True})
+        self.assertEqual(self.post(f'/api/study/{sid}/round-action', {'action': 'finish', 'round_number': 1}).status_code, 200)
+        report = self.client.get(f'/api/study/{sid}/rounds/1').json()
+        self.assertEqual((report['correct'], report['wrong'], report['unanswered']), (0, 1, 1))
+        next_item = self.client.get(f'/api/study/{sid}/next').json()['item']
+        self.assertEqual((next_item['round_number'], next_item['total']), (2, 2))
+        self.assertEqual(self.post(base + '/answer', {'answer': 'hello', 'practice': True}).status_code, 409)
+        self.assertEqual(self.post(f'/api/study/{sid}/round-action', {'action': 'finish', 'round_number': 1}).status_code, 409)
+        with connect() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM attempts WHERE correct=0').fetchone()[0], 1)
+            self.assertEqual(db.execute('SELECT hint_used FROM study_items WHERE id=?', (item['id'],)).fetchone()[0], 1)
+            self.assertEqual([r[0] for r in db.execute('SELECT stage FROM words')], [-1, -1])
 
     def test_round_progress_survives_relogin(self):
         deck = self.make_deck()
@@ -266,9 +286,8 @@ class CoreChecks(unittest.TestCase):
                 self.assertEqual(response.status_code, 200, response.text)
                 self.assertTrue(response.json()['practice_pending'])
                 self.assertEqual(snapshot(), pending)
-        for action in ('finish', 'interrupt'):
-            self.assertEqual(self.post(f'/api/study/{sid}/round-action', {'action': action, 'round_number': 1}).status_code, 409)
-            self.assertEqual(snapshot(), pending)
+        self.assertEqual(self.post(f'/api/study/{sid}/round-action', {'action': 'interrupt', 'round_number': 1}).status_code, 422)
+        self.assertEqual(snapshot(), pending)
         self.assertEqual(self.client.get(f'/api/study/{sid}/rounds/1').status_code, 409)
         self.assertEqual(self.post(base + '/reveal').status_code, 200)
         done = self.post(base + '/answer', {'answer': 'HELLO', 'practice': True}).json()

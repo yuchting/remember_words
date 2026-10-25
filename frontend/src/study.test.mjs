@@ -22,7 +22,7 @@ globalThis.window = { speechSynthesis: {} }
 const spoken = []
 globalThis.speechSynthesis = { cancel() {}, speak: value => spoken.push(value.text) }
 globalThis.SpeechSynthesisUtterance = class { constructor(text) { this.text = text } }
-const state = await import(moduleUrl(`const onMounted = () => {}; const onUnmounted = () => {};\n${script}\nexport { session, item, answer, answered, content, busy, cooldownSeconds, submit, reveal, continueStudy, studyEnter, editingExample, resetFluency, key, beforeInput, nativeInput, report, reportWords, answerInput, speak, clearAudio, resumeStudy, activeStudies, reviewDeckIds, reviewCounts, selectedReviewCount, refresh, start, deckProgress };`))
+const state = await import(moduleUrl(`const onMounted = () => {}; const onUnmounted = () => {};\n${script}\nexport { session, item, answer, answered, content, busy, cooldownSeconds, submit, reveal, continueStudy, studyEnter, editingExample, resetFluency, key, beforeInput, nativeInput, report, reportWords, answerInput, speak, clearAudio, resumeStudy, activeStudies, reviewDeckIds, reviewCounts, selectedReviewCount, refresh, start, deckProgress, leaveStudy, pendingReport, summary, error };`))
 globalThis.document = { body: {}, activeElement: null }
 state.session.value = 1
 state.item.value = { id: 2 }
@@ -331,4 +331,38 @@ await state.start()
 assert.deepEqual(selection, { deck_ids: [2] })
 assert.equal(state.session.value, 102)
 assert.equal(state.activeStudies.value.length, 2)
+// 返回先结算再退出；巩固未完成也可返回，失败保留学习页面。
+assert.doesNotMatch(app, /中断本轮|提前完结|roundAction\(/)
+for (const mode of ['answer', 'practice', 'empty', 'pending', 'report', 'complete', 'failure']) {
+  state.session.value = 101
+  state.item.value = mode === 'complete' ? null : { id: 99, round_number: 3, practice_pending: mode === 'practice' }
+  state.pendingReport.value = mode === 'pending' ? 3 : null
+  state.report.value = mode === 'report' ? { round_number: 3, words: [] } : null
+  state.summary.value = mode === 'complete' ? { attempts: 2, correct: 2 } : null
+  const calls = []
+  fetch = async (url, options) => {
+    calls.push(url)
+    if (url.endsWith('/round-action')) {
+      assert.deepEqual(JSON.parse(options.body), { action: 'finish', round_number: 3 })
+      return mode === 'failure' ? Response.json({ detail: '保存失败' }, { status: 500 }) : Response.json({ ok: true })
+    }
+    if (url.endsWith('/decks')) return Response.json([])
+    if (url.endsWith('/reviews/due')) return Response.json({ count: 0, decks: [] })
+    if (url.endsWith('/study/active')) return Response.json({ sessions: [] })
+    throw new Error(`Unexpected URL: ${url}`)
+  }
+  await state.leaveStudy()
+  const shouldFinish = ['answer', 'practice', 'empty', 'failure'].includes(mode)
+  assert.equal(calls.some(url => url.endsWith('/round-action')), shouldFinish)
+  if (shouldFinish) assert.ok(calls[0].endsWith('/round-action'))
+  if (mode === 'failure') {
+    assert.equal(state.session.value, 101)
+    assert.equal(state.item.value.id, 99)
+    assert.match(state.error.value, /保存失败/)
+    assert.equal(calls.length, 1)
+  } else {
+    assert.equal(state.session.value, null)
+    assert.equal(state.item.value, null)
+  }
+}
 console.log('study checks passed')

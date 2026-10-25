@@ -484,19 +484,6 @@ const reportWords = computed(() => [...(report.value?.words ?? [])].sort((a, b) 
   return rank(a) - rank(b)
 }))
 const pendingReport = ref<number | null>(null)
-async function roundAction(action: 'interrupt' | 'finish') {
-  if (!item.value || !confirm(action === 'interrupt' ? '放弃本轮全部答题和提示记录，不计成绩，下次从本轮开头重来？' : '提前结算本轮？只计已答成绩，错误和未答词进入下一轮。')) return
-  await run(async () => {
-    const number = item.value!.round_number
-    await api(`/study/${session.value}/round-action`, 'POST', { action, round_number: number })
-    if (action === 'finish') {
-      report.value = await api<RoundReport>(`/study/${session.value}/rounds/${number}`)
-    } else {
-      await refresh(); session.value = null; item.value = null; content.value = null
-    }
-    pendingReport.value = null
-  })
-}
 async function loadNext() {
   clearCooldown()
   clearAudio()
@@ -664,7 +651,13 @@ watch(page, clearAudio, { flush: 'sync' })
 async function leaveStudy() {
   clearCooldown()
   clearAudio()
-  await run(async () => { await refresh(); session.value = null; item.value = null; content.value = null; summary.value = null; report.value = null; pendingReport.value = null })
+  await run(async () => {
+    if (session.value && item.value && !report.value && pendingReport.value === null) {
+      await api(`/study/${session.value}/round-action`, 'POST', { action: 'finish', round_number: item.value.round_number })
+    }
+    await refresh()
+    session.value = null; item.value = null; content.value = null; summary.value = null; report.value = null; pendingReport.value = null
+  })
 }
 onUnmounted(() => {
   window.removeEventListener('keydown', studyEnter)
@@ -697,7 +690,6 @@ onMounted(async () => {
       <section v-if="report" class="panel"><h1>第 {{ report.round_number }} 轮报告</h1><p>正确 {{ report.correct }} · 错误 {{ report.wrong }} · 未答 {{ report.unanswered }}（不计分）</p><p class="fine">下一轮入选率按规则计算，不是记忆概率。阶段不是精确记忆分数。</p><div class="table-scroll"><table><caption class="sr-only">本轮单词结果，错词优先</caption><thead><tr><th scope="col">单词</th><th scope="col">释义</th><th scope="col">结果</th><th scope="col">下一轮入选率</th><th scope="col">记忆阶段</th></tr></thead><tbody><tr v-for="word in reportWords" :key="word.word_id" :class="{ 'report-wrong': word.correct !== null && !word.correct }"><th scope="row" lang="en">{{ word.word }}</th><td>{{ word.meaning }}</td><td>{{ word.evaluation }}</td><td>{{ word.next_round_probability }}%</td><td>{{ word.stage < 0 ? '未学' : word.stage }}</td></tr></tbody></table></div><button :disabled="busy" @click="run(loadNext)">继续</button></section>
       <section v-else-if="summary" class="panel result-panel"><span class="result-mark">✓</span><p class="eyebrow">每次回忆，都算进步</p><h1>这一轮，完成了！</h1><div class="result-stats"><div><strong>{{ summary.attempts }}</strong><span>回答次数</span></div><div><strong>{{ summary.correct }}</strong><span>正确次数</span></div><div><strong>{{ summary.attempts ? Math.round(summary.correct / summary.attempts * 100) : 0 }}%</strong><span>正确率</span></div></div><p class="muted">让记忆休息一下，到期后再来巩固。</p><button class="primary" :disabled="busy" @click="leaveStudy">回到词库</button></section>
       <section v-else-if="item" class="panel study-panel">
-        <div class="study-actions"><button :disabled="busy || pendingReport !== null" @click="roundAction('interrupt')">中断本轮，不计成绩</button><button :disabled="busy || pendingReport !== null" @click="roundAction('finish')">提前完结，结算已答</button></div>
         <p class="eyebrow">看中文 · 回忆英文</p><h1 class="meaning">{{ item.meaning }}</h1>
         <form @submit.prevent="submit()"><label class="sr-only" for="answer">输入英文单词</label><input id="answer" ref="answerInput" v-model="answer" @beforeinput="beforeInput" @input="nativeInput" @paste="fluent = false" @cut="fluent = false" @drop="fluent = false" class="answer-input" lang="en" autocomplete="off" autocapitalize="none" :spellcheck="false" :disabled="busy || answered" placeholder="在这里输入英文" /><div class="study-actions"><button type="button" class="secondary" :disabled="busy || answered || !!content" @click="reveal">揭示答案</button><button type="button" class="secondary" :disabled="busy || answered" @click="submit(true)">不会，记一下</button><button class="primary" :disabled="busy || answered || !answer.trim()">提交答案</button></div></form>
         <div v-if="content" class="answer-card" aria-live="polite"><p v-if="answered" :class="['answer-status', content.correct ? 'correct' : 'incorrect']">{{ content.practice && content.spelling_correct ? '巩固拼写正确；首次成绩不变。' : content.correct ? '回答正确，记得不错！' : '还没记牢，继续后重输同一个词。' }}</p><div class="word-line"><h2>{{ content.word }}</h2><span class="muted">{{ content.phonetic }}</span><button class="audio-button" aria-label="播放单词发音" @click="speak(content.word, content.audio, content.word_id)">朗读单词</button></div><p>{{ content.meaning }}</p><ul v-if="content.definitions?.length" lang="en"><li v-for="definition in content.definitions.slice(0, 5)" :key="definition">{{ definition }}</li></ul><template v-if="content.example"><div class="example-line"><p lang="en">{{ content.example }}</p><button class="text-button" @click="speak(content.example!, undefined, content.word_id, 'example')">朗读例句</button></div><p class="muted">{{ content.example_translation }}</p></template><p v-else class="muted">暂无例句，可查词补全或手工添加。</p><div v-if="content.word_id" class="content-tools"><button class="secondary" :disabled="busy || editingExample" @click="enrich">查词补全</button><button class="text-button" :disabled="busy" @click="editExample">编辑例句与译文</button></div><form v-if="editingExample" class="example-editor" @submit.prevent="saveExample"><label>完整英文例句<textarea v-model="exampleDraft" lang="en" required maxlength="2000" rows="3" placeholder="填写完整英文句子"></textarea></label><label>完整中文译文<textarea v-model="translationDraft" required maxlength="2000" rows="3" placeholder="填写对应中文译文"></textarea></label><div class="content-tools"><button class="primary" :disabled="busy">保存例句与译文</button><button type="button" class="text-button" :disabled="busy" @click="editingExample = false">取消</button></div></form><p v-if="!answered" class="fine">看过答案也没关系，输入一遍加深印象，或选择“不会”。</p><button v-if="answered" ref="continueButton" class="primary wide" :disabled="busy || cooldownSeconds > 0" @click="continueStudy">{{ busy ? '正在加载…' : cooldownSeconds > 0 ? `继续（${cooldownSeconds}秒）` : '继续 →' }}</button></div>

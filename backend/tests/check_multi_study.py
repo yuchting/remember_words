@@ -20,6 +20,8 @@ class MultiStudyChecks(unittest.TestCase):
         other = self.post(f'/api/decks/{second}/study').json()['id']
         self.assertNotEqual(sid, other)
         question = self.client.get(f'/api/study/{other}/next').json()
+        item = self.client.get(f'/api/study/{sid}/next').json()['item']
+        self.post(f'/api/study/{sid}/items/{item["id"]}/answer', {'skip': True})
         self.post(f'/api/study/{sid}/round-action', {'action': 'finish', 'round_number': 1})
         self.assertEqual(self.client.get(f'/api/study/{other}/next').json(), question)
         sessions = self.client.get('/api/study/active').json()['sessions']

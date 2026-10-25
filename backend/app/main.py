@@ -496,20 +496,15 @@ class RoundAction(InputModel):
 
 @app.post('/api/study/{sid}/round-action')
 def round_action(sid: int, data: RoundAction, account=Depends(user)):
-    if data.action not in ('interrupt', 'finish'):
-        raise HTTPException(422, '不支持的轮次操作')
     with connect() as db:
         db.execute('BEGIN IMMEDIATE')
         session = owned_session(db, sid, account)
+        if data.action != 'finish':
+            raise HTTPException(422, '不支持的轮次操作')
         if session['status'] != 'active' or session['round_number'] != data.round_number:
             raise HTTPException(409, '轮次已变化，请刷新')
-        if db.execute('SELECT 1 FROM study_items WHERE session_id=? AND practice_pending=1', (sid,)).fetchone():
-            raise HTTPException(409, '请先完成当前词的巩固拼写')
-        if data.action == 'interrupt':
-            db.execute('''DELETE FROM attempts WHERE item_id IN
-                (SELECT id FROM study_items WHERE session_id=? AND round_number=?)''', (sid, data.round_number))
-            db.execute('UPDATE study_items SET hint_used=0 WHERE session_id=? AND round_number=?', (sid, data.round_number))
-        else:
+        if db.execute('''SELECT 1 FROM attempts a JOIN study_items i ON i.id=a.item_id
+            WHERE i.session_id=? AND i.round_number=?''', (sid, data.round_number)).fetchone():
             finish_round(db, session, time.time())
         return {'ok': True}
 
@@ -551,6 +546,8 @@ def answer(sid: int, iid: int, data: Answer, account=Depends(user)):
             raise HTTPException(409, '请按当前题目顺序提交')
         if not data.answer.strip() and not data.skip:
             raise HTTPException(422, '请输入答案，或点击不会')
+        if data.practice and item['practice_pending'] and (not current or current['id'] != iid):
+            raise HTTPException(409, '题目已变化，请刷新')
         if data.practice and not already:
             raise HTTPException(409, '当前题尚未进入巩固')
         return submit(db, session, item, data.answer, data.skip, time.time(), data.practice)
