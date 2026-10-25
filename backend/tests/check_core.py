@@ -14,7 +14,7 @@ from backend.app import db as test_database
 test_database.DB_PATH = Path(TEMP.name) / 'test.sqlite3'
 from backend.app.db import connect, initialize
 from backend.app.main import app, hasher
-from backend.app.study import schedule
+from backend.app.fsrs_schedule import review
 
 
 class CoreChecks(unittest.TestCase):
@@ -240,7 +240,7 @@ class CoreChecks(unittest.TestCase):
             connection.execute("INSERT INTO users VALUES(1,'old','hash','parent',1)")
             database.migrate(connection)
             database.migrate(connection)
-            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0], 4)
+            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0], 5)
             self.assertEqual(connection.execute('SELECT username FROM users').fetchone()[0], 'old')
             self.assertIn('practice_pending', [r[1] for r in connection.execute('PRAGMA table_info(study_items)')])
 
@@ -266,7 +266,8 @@ class CoreChecks(unittest.TestCase):
         self.assertTrue(first['practice_pending'])
         self.assertFalse(first['round_finished'])
         pending = snapshot()
-        self.assertEqual(pending[0], initial[0])
+        self.assertEqual(pending[0][0][0], -1)
+        self.assertIsNotNone(pending[0][0][1])
         self.assertEqual(len(pending[1]), 1)
         self.assertEqual(pending[2], 1)
         self.login('bob')
@@ -319,7 +320,7 @@ class CoreChecks(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertTrue(response.json()['complete'])
         complete = snapshot()
-        self.assertEqual(complete[0], [(0, 1600)])
+        self.assertEqual(complete[0], [(0, pending[0][0][1])])
         self.assertEqual(len(complete[1]), 2)
         self.assertEqual(complete[2], 2)
         for path, payload in (
@@ -332,9 +333,9 @@ class CoreChecks(unittest.TestCase):
             self.assertEqual(snapshot(), complete)
 
     def test_schedule(self):
-        self.assertEqual(schedule(-1, False, 100), (0, 700))
-        self.assertEqual(schedule(3, True, 100), (0, 700))
-        self.assertEqual(schedule(5, False, 100), (5, 2592100))
+        self.assertEqual(review(None, 1, True, 'normal', 100, None).due.timestamp(), 700)
+        self.assertEqual(review(None, 1, False, 'normal', 100, None).due.timestamp(), 160)
+        self.assertEqual(review(None, 1, True, 'hard', 100, None).due.timestamp(), 430)
 
     def test_content_failure_and_account_revocation(self):
         deck = self.make_deck()

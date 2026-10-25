@@ -385,5 +385,7 @@ state.nativeInput({ inputType: 'insertFromPaste', data: 'word', target: { value:
 state.answer.value = 'word'; await state.submit()
 assert.equal(effortRequest.effort, 'normal', '粘贴后输入信号不可用，不自动判吃力')
 assert.match(app, /任务队列固定/)
+assert.match(app, /以前答对的词也可能因时间流逝重新出现/)
+assert.match(app, /FSRS 根据真实间隔与回忆表现/)
 assert.match(app, /不影响拼写判分/)
 console.log('study checks passed')

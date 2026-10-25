@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from . import db
 from .study import normalize
+from .fsrs_schedule import load_card
 
 MAX_BYTES = 2 * 1024 * 1024
 Key = Annotated[int, Field(ge=1, le=9223372036854775807)]
@@ -36,6 +37,7 @@ class Word(Model):
     memory_interval: float = Field(default=0, ge=0, le=2592000, allow_inf_nan=False)
     last_seen_at: Timestamp | None = None
     last_success_at: Timestamp | None = None
+    fsrs_card: str | None = Field(default=None, max_length=2048)
 
 
 class Deck(Model):
@@ -140,7 +142,11 @@ def validate(value):
                     parsed = urlsplit(word.audio)
                     if parsed.scheme != 'https' or parsed.netloc not in ('api.dictionaryapi.dev', 'ssl.gstatic.com'):
                         raise ValueError('音频地址不属于允许的词典来源')
-                if (word.stage == -1) != (word.due_at is None):
+                if word.fsrs_card is not None:
+                    card = load_card(word.fsrs_card)
+                    if word.due_at != card.due.timestamp():
+                        raise ValueError('FSRS 到期时间不符')
+                elif (word.stage == -1) != (word.due_at is None):
                     raise ValueError('复习阶段与到期时间不符')
                 owners[word.id] = deck.id
         sessions = index(backup.study_sessions)
@@ -204,7 +210,7 @@ def validate(value):
 
 FIELDS = {
     'decks': ('id', 'name', 'created_at', 'started_at'),
-    'words': ('id', 'word', 'meaning', 'example', 'example_translation', 'audio', 'phonetic', 'stage', 'due_at', 'last_seen_at', 'last_success_at', 'memory_interval'),
+    'words': ('id', 'word', 'meaning', 'example', 'example_translation', 'audio', 'phonetic', 'stage', 'due_at', 'last_seen_at', 'last_success_at', 'memory_interval', 'fsrs_card'),
     'study_sessions': ('id', 'deck_id', 'kind', 'status', 'round_number', 'scope_deck_ids'),
     'study_items': ('id', 'session_id', 'word_id', 'round_number', 'position', 'hint_used'),
     'attempts': ('id', 'item_id', 'answer', 'correct', 'created_at', 'effort', 'needs_retry', 'delayed_recall'),

@@ -76,7 +76,12 @@ UPDATE study_sessions SET scope_deck_ids=coalesce((SELECT json_group_array(deck_
  (SELECT DISTINCT w.deck_id FROM study_items i JOIN words w ON w.id=i.word_id WHERE i.session_id=study_sessions.id)), '[]') WHERE deck_id IS NULL;
 PRAGMA user_version=4;
 '''
-SCHEMA = SCHEMA_V3 + TIME_SCHEDULING
+SCHEMA_V4 = SCHEMA_V3 + TIME_SCHEDULING
+FSRS_SCHEDULING = '''
+ALTER TABLE words ADD COLUMN fsrs_card TEXT;
+PRAGMA user_version=5;
+'''
+SCHEMA = SCHEMA_V4 + FSRS_SCHEDULING
 
 
 def migrate(db: sqlite3.Connection) -> None:
@@ -89,6 +94,10 @@ def migrate(db: sqlite3.Connection) -> None:
                 db.execute(statement)
     if db.execute('PRAGMA user_version').fetchone()[0] == 3:
         for statement in TIME_SCHEDULING.split(';'):
+            if statement.strip():
+                db.execute(statement)
+    if db.execute('PRAGMA user_version').fetchone()[0] == 4:
+        for statement in FSRS_SCHEDULING.split(';'):
             if statement.strip():
                 db.execute(statement)
 
@@ -115,8 +124,8 @@ def initialize():
         version = db.execute('PRAGMA user_version').fetchone()[0]
         if version == 0:
             db.executescript(SCHEMA)
-        elif version in (1, 2, 3):
+        elif version in (1, 2, 3, 4):
             db.execute('BEGIN IMMEDIATE')
             migrate(db)
-        elif version != 4:
+        elif version != 5:
             raise ValueError('不支持的数据库版本')

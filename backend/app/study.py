@@ -1,16 +1,13 @@
 import random
 import unicodedata
 
+from .fsrs_schedule import review
+
 INTERVALS = (600, 86400, 3 * 86400, 7 * 86400, 14 * 86400, 30 * 86400)
 
 
 def normalize(value):
     return unicodedata.normalize('NFC', value).strip().casefold()
-
-
-def schedule(stage, failed, now):
-    next_stage = 0 if failed else min(stage + 1, len(INTERVALS) - 1)
-    return next_stage, now + INTERVALS[next_stage]
 
 
 def add_round(db, session_id, round_number, word_ids):
@@ -37,30 +34,19 @@ def content(row):
 
 def record_memory(db, word_id: int, correct: bool, now: float, effort: str = 'normal') -> None:
     word = db.execute('SELECT * FROM words WHERE id=?', (word_id,)).fetchone()
-    elapsed = max(0, now - word['last_seen_at']) if word['last_seen_at'] is not None else 0
-    stage = word['stage']
-    prior = min(30 * 86400, max(600, word['memory_interval']))
-    if not correct:
-        stage = -1 if stage < 0 else max(0, stage - 1)
-        delay = max(600, min(86400, prior / 4))
-    elif stage < 0:
-        stage, delay = 0, 600
-    elif effort == 'hard':
-        delay = 600
-    elif elapsed >= prior:
-        # ponytail: conservative time-based growth, not calibrated probability; evaluate FSRS before replacing.
-        delay = min(30 * 86400, max(prior, elapsed) * 2)
-        stage = max(index for index, interval in enumerate(INTERVALS) if interval <= delay)
-    else:
-        delay = prior
-    growing = correct and effort == 'normal' and elapsed >= prior
-    recent = correct and word['stage'] >= 0 and effort == 'normal' and not growing
-    due = word['due_at'] if recent else None if stage < 0 else now + delay
-    if stage >= 0 and not recent:
-        stage = max(index for index, interval in enumerate(INTERVALS) if interval <= delay)
-    db.execute('''UPDATE words SET stage=?,due_at=?,memory_interval=?,last_seen_at=?,
-        last_success_at=CASE WHEN ? THEN ? ELSE last_success_at END WHERE id=?''',
-        (stage, due, prior if recent else delay, now, int(correct), now, word_id))
+    card = review(word['fsrs_card'], word_id, correct, effort, now, word['last_seen_at'])
+    if card is None:
+        # Legacy/no-model exposure is not evidence for initializing Good parameters.
+        due = word['due_at'] if word['due_at'] is not None else now + 600
+        db.execute('UPDATE words SET stage=max(stage,0),due_at=?,last_seen_at=?,last_success_at=? WHERE id=?',
+                   (due, now, now, word_id))
+        return
+    delay = (card.due - card.last_review).total_seconds()
+    # stage remains a display/learned compatibility field, never input to FSRS.
+    stage = -1 if word['stage'] < 0 and not correct else max(0, max(
+        (index for index, interval in enumerate(INTERVALS) if interval <= delay), default=0))
+    db.execute('UPDATE words SET stage=?,due_at=?,memory_interval=?,last_seen_at=?,last_success_at=CASE WHEN ? THEN ? ELSE last_success_at END,fsrs_card=? WHERE id=?',
+        (stage, card.due.timestamp(), delay, now, int(correct), now, card.to_json(), word_id))
 
 
 def submit(db, session, item, answer, skip, now, practice=False, effort='normal'):
@@ -102,6 +88,15 @@ def finish_round(db, session, now):
         LEFT JOIN attempts a ON a.item_id=i.id WHERE i.session_id=? AND i.round_number=?
         ORDER BY i.position''', (session['id'], session['round_number'])).fetchall()
     failures = [row['word_id'] for row in rows if row['correct'] is None or row['needs_retry']]
+    # Reconsider due cards only between rounds. Multi-deck tasks keep their original word set.
+    if session['deck_id'] is not None:
+        due = db.execute('SELECT id FROM words WHERE deck_id=? AND stage>=0 AND due_at<=? AND (last_seen_at IS NULL OR last_seen_at<=?)',
+                         (session['deck_id'], now, now - 600)).fetchall()
+    else:
+        due = db.execute('''SELECT DISTINCT w.id FROM words w JOIN study_items i ON i.word_id=w.id
+            WHERE i.session_id=? AND i.round_number=1 AND w.stage>=0 AND w.due_at<=? AND (w.last_seen_at IS NULL OR w.last_seen_at<=?)''',
+                         (session['id'], now, now - 600)).fetchall()
+    failures = list(dict.fromkeys(failures + [row['id'] for row in due]))
     if failures:
         number = session['round_number'] + 1
         add_round(db, session['id'], number, failures)

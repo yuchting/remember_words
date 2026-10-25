@@ -36,7 +36,7 @@ class TimeStudyChecks(unittest.TestCase):
         first_item = self.answer_current(sid, 100000)
         with database.connect() as db:
             state = tuple(db.execute('SELECT stage,due_at,last_seen_at FROM words WHERE id=(SELECT word_id FROM study_items WHERE id=?)', (first_item['id'],)).fetchone())
-        self.assertEqual(state, (1, 300000, 100000))
+        self.assertEqual(state, (0, 100600, 100000))
         # Replay after two days cannot alter scheduling or add evidence.
         with patch('backend.app.main.time.time', return_value=272800):
             self.post(f'/api/study/{sid}/items/{first_item["id"]}/answer', {'answer': 'anything', 'effort': 'hard'})
@@ -45,10 +45,14 @@ class TimeStudyChecks(unittest.TestCase):
         self.assertEqual(question['item']['total'], 3)
         self.answer_current(sid, 272800)
         self.answer_current(sid, 272801)
+        # Earlier correct card became due across days; fixed-scope next round includes it.
+        next_item = self.client.get(f'/api/study/{sid}/next').json()['item']
+        self.assertEqual(next_item['round_number'], 2)
+        self.answer_current(sid, 272802)
         summary = self.client.get(f'/api/study/{sid}/next').json()['summary']
-        self.assertEqual(summary['delayed_recall'], {'attempts': 3, 'correct': 3, 'accuracy': 1.0})
+        self.assertEqual(summary['delayed_recall'], {'attempts': 4, 'correct': 4, 'accuracy': 1.0})
         stats = self.client.get('/api/statistics?range=all').json()
-        self.assertEqual(stats['delayed_recall']['attempts'], 3)
+        self.assertEqual(stats['delayed_recall']['attempts'], 4)
         # Single-library study includes words newly due after task completion.
         self.assertEqual(self.post(f'/api/decks/{first}/study').status_code, 200)
 
@@ -119,13 +123,16 @@ class TimeStudyChecks(unittest.TestCase):
             db.execute('''UPDATE words SET stage=4,memory_interval=1209600,
                 last_seen_at=1000,last_success_at=1000,due_at=1210600 WHERE id=?''', (wid,))
             record_memory(db, wid, True, 2000)
-            self.assertEqual(tuple(db.execute('SELECT memory_interval,due_at FROM words WHERE id=?', (wid,)).fetchone()), (1209600, 1210600))
+            self.assertEqual(tuple(db.execute('SELECT memory_interval,due_at FROM words WHERE id=?', (wid,)).fetchone()), (600, 2600))
+            original = db.execute('SELECT fsrs_card FROM words WHERE id=?', (wid,)).fetchone()[0]
             record_memory(db, wid, True, 2001, 'hard')
-            self.assertEqual(tuple(db.execute('SELECT memory_interval,due_at,stage FROM words WHERE id=?', (wid,)).fetchone()), (600, 2601, 0))
             record_memory(db, wid, True, 2002)
-            self.assertEqual(tuple(db.execute('SELECT memory_interval,due_at FROM words WHERE id=?', (wid,)).fetchone()), (600, 2601))
+            self.assertEqual(db.execute('SELECT fsrs_card FROM words WHERE id=?', (wid,)).fetchone()[0], original)
             record_memory(db, wid, True, 302002)
-            self.assertEqual(tuple(db.execute('SELECT memory_interval,due_at,stage FROM words WHERE id=?', (wid,)).fetchone()), (600000, 902002, 2))
+            from backend.app.fsrs_schedule import load_card
+            card = load_card(db.execute('SELECT fsrs_card FROM words WHERE id=?', (wid,)).fetchone()[0])
+            self.assertEqual(card.state.value, 2)
+            self.assertGreater(card.due.timestamp(), 302002)
 
     def test_v3_migration_keeps_task_and_evidence_conservative(self):
         with sqlite3.connect(':memory:') as db:

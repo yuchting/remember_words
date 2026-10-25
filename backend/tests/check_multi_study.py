@@ -125,7 +125,7 @@ class MultiStudyChecks(unittest.TestCase):
             with patch.object(database, 'DB_PATH', path):
                 database.initialize()
             with sqlite3.connect(path) as db:
-                self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 4)
+                self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 5)
 
     def test_migration_preserves_every_row_and_position(self):
         for schema in (database.BASE_SCHEMA, database.SCHEMA_V2):
@@ -145,7 +145,7 @@ class MultiStudyChecks(unittest.TestCase):
                 items = db.execute('SELECT id,session_id,word_id,round_number,position,hint_used FROM study_items').fetchall()
                 database.migrate(db)
                 database.migrate(db)
-                self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 4)
+                self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 5)
                 for table in tables:
                     self.assertEqual([row[:len(before[table][0])] for row in db.execute(f'SELECT * FROM {table}')], before[table])
                 self.assertEqual(db.execute('SELECT id,session_id,word_id,round_number,position,hint_used FROM study_items').fetchall(), items)

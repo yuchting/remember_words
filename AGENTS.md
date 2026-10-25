@@ -14,9 +14,9 @@
 ## 业务不变量
 
 - 家长由 CLI 创建，网页管理孩子；所有资源由后端校验归属，家长管理权限必须显式授予，不能靠前端隐藏。
-- 学校指定中文释义与英文拼写，严格判分；跨库同词允许重复、各自进度。支持一天多次、隔天继续、考前速记，不限每次题量。单库学习与跨多库综合复习共享逐词记忆状态；涉及同一词库不得新建重叠任务。综合复习只建一个固定队列任务，默认纳入发起时 stage>=0 且到期词，可显式包含未学／尚未过关词，可跨 2～3 天恢复；任务外新增到期仅提示重新发起，不静默追加。首轮覆盖待学集合，之后仅上一轮错词及至多一次的流畅巩固。提示、揭示答案、不会均不算独立回忆成功；当前题响应不提前下发拼写。
+- 学校指定中文释义与英文拼写，严格判分；跨库同词允许重复、各自进度。支持一天多次、隔天继续、考前速记，不限每次题量。单库学习与跨多库综合复习共享逐词记忆状态；涉及同一词库不得新建重叠任务。综合复习只建一个固定队列任务，默认纳入发起时 stage>=0 且到期词，可显式包含未学／尚未过关词，可跨 2～3 天恢复；任务外新增到期仅提示重新发起，不静默追加。首轮覆盖待学集合，之后包含上一轮错词、至多一次流畅巩固及范围内按 FSRS 到期词；单库可重选该库，综合任务仅限固定词条集合，当前轮队列不追加。提示、揭示答案、不会均不算独立回忆成功；当前题响应不提前下发拼写。
 - 判分仅 NFC + strip + casefold，不放宽内部空格、标点、拼写。队列持久化；答题、调度、轮次推进同一事务；`attempts.item_id` 唯一，重复请求不重复推进。
-- 调度按真实经过时间、逐次提交保存，不等整轮结束；返回页面只暂停，不结算或撤销。立即曝光后重输不算长期回忆；输入流畅度 `hard` 仅辅助、不改变 `correct`，最多一次额外流畅巩固，禁止无限循环。调度为基于实际间隔的保守启发式，非概率模型：首次独立答对 600 秒，达到既有间隔后成功按实际间隔的 2 倍增长、最多 30 天；近期重复不放大间隔或延后原到期，失败缩至原间隔 1/4（600 秒～1 天），`hard` 缩至 600 秒。未独立答对的新词保持未学；阶段为兼容展示。FSRS 未来评估，不宣称科学校准或长期效果已验证。
+- 调度按真实经过时间、逐次提交保存，不等整轮结束；返回页面只暂停，不结算或撤销。立即曝光后重输不算长期回忆；输入流畅度 `hard` 仅辅助、不改变 `correct`，最多一次额外流畅巩固，禁止无限循环。采用成熟 `fsrs` 库持久化逐词状态，默认目标保持率 90%、最长 30 天、关闭 fuzz；Again/Good/Hard 对应失败／普通正确／吃力正确，立即巩固不重复喂成功。曝光时间与模型检验时间区分，近期重复不虚增长期状态。旧状态在首次有效评估初始化，不从 stage 伪造模型参数；阶段仅兼容展示。不得把目标保持率当作个人成绩，不宣称已按个人校准或长期效果已验证。
 - 导入先预览、重复词逐组选一或全排除；最终接口拒绝重复。重复范围为本次输入，不跨词库。`word`、`meaning` 必填，`id` 不作主键，可选例句/译文；请求 ≤2 MiB，词库 ≤5000 条，事务全成或全败。
 - XLSX 首行要求 `word`/`words`、`meaning`；逐页扫描，坏页报告原因，有效页多选合并预览、跨页去重；列表显示前 5 个词。不得静默纠正拼错表头或跳过坏行。
 - Google 先公开下载，公开不可访问才私有回退；仅家长且 `WORDS_GOG_PRIVATE=1` 可调用已授权 `gog`。格式错误不回退；固定 argv、无 shell、超时。只允许已校验 Google 来源及受限下载重定向，不提供任意 URL 代理。
@@ -38,7 +38,7 @@
 保持小结构、标准库优先，不加无需求分层。改 API 同步前端类型；依赖变更同步锁文件；路径用 pathlib，输出路径用 `/`。保留用户工作，不擅自提交、推送或覆盖数据。
 
 ```sh
-.venv/bin/python -m unittest backend.tests.check_core backend.tests.check_management backend.tests.check_sources backend.tests.check_database_admin backend.tests.check_user_backup backend.tests.check_sop backend.tests.check_speech backend.tests.check_statistics backend.tests.check_multi_study backend.tests.check_time_study -v
+.venv/bin/python -m unittest backend.tests.check_core backend.tests.check_management backend.tests.check_sources backend.tests.check_database_admin backend.tests.check_user_backup backend.tests.check_sop backend.tests.check_speech backend.tests.check_statistics backend.tests.check_multi_study backend.tests.check_time_study backend.tests.check_fsrs -v
 npm --prefix frontend test
 npm --prefix frontend run build
 bash -n sop.sh

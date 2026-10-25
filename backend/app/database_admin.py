@@ -35,10 +35,10 @@ def _validate(connection):
     connection.execute('PRAGMA query_only=ON')
     connection.execute('PRAGMA trusted_schema=OFF')
     version = connection.execute('PRAGMA user_version').fetchone()[0]
-    if version not in (1, 2, 3, 4):
-        raise ValueError('仅支持数据库版本 1、2、3、4')
+    if version not in (1, 2, 3, 4, 5):
+        raise ValueError('仅支持数据库版本 1、2、3、4、5')
     with closing(sqlite3.connect(':memory:')) as expected:
-        expected.executescript({1: db.BASE_SCHEMA, 2: db.SCHEMA_V2, 3: db.SCHEMA_V3, 4: db.SCHEMA}[version])
+        expected.executescript({1: db.BASE_SCHEMA, 2: db.SCHEMA_V2, 3: db.SCHEMA_V3, 4: db.SCHEMA_V4, 5: db.SCHEMA}[version])
         if _schema(connection) != _schema(expected):
             raise ValueError('数据库结构不匹配，或包含额外表、索引、视图、触发器')
     if connection.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
@@ -47,6 +47,11 @@ def _validate(connection):
         raise ValueError('数据库外键检查失败')
     if not connection.execute("SELECT 1 FROM users WHERE role='parent' AND is_active=1 LIMIT 1").fetchone():
         raise ValueError('数据库必须至少包含一个启用的家长账户')
+    if version == 5:
+        from .fsrs_schedule import load_card
+        for value, due in connection.execute('SELECT fsrs_card,due_at FROM words WHERE fsrs_card IS NOT NULL'):
+            if load_card(value).due.timestamp() != due:
+                raise ValueError('FSRS 到期时间不符')
     for (password_hash,) in connection.execute('SELECT password_hash FROM users'):
         try:
             if not isinstance(password_hash, str) or len(password_hash) > 512:

@@ -162,7 +162,7 @@ def register(app, user, owned_word, cancel_word_sessions):
             cancel_word_sessions(db, [wid])
             db.execute('DELETE FROM attempts WHERE item_id IN (SELECT id FROM study_items WHERE word_id=?)', (wid,))
             db.execute('DELETE FROM study_items WHERE word_id=?', (wid,))
-            db.execute('UPDATE words SET stage=-1,due_at=NULL,last_seen_at=NULL,last_success_at=NULL,memory_interval=0 WHERE id=?', (wid,))
+            db.execute('UPDATE words SET stage=-1,due_at=NULL,last_seen_at=NULL,last_success_at=NULL,memory_interval=0,fsrs_card=NULL WHERE id=?', (wid,))
         return {'ok': True}
 
     @app.get('/api/words/{wid}/history')

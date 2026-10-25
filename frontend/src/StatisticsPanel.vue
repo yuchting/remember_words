@@ -101,7 +101,7 @@ onBeforeUnmount(() => { requestId++ })
           <span>{{ deck.passed }} / {{ deck.total }}（{{ percent(ratio(deck.passed, deck.total)) }}）</span>
         </div>
         <h4>整体阶段分布</h4>
-        <p class="muted">占当前总词数；阶段不是精确记忆概率。</p>
+        <p class="muted">占当前总词数；阶段仅为兼容展示，实际排期使用 FSRS，阶段不是精确记忆概率。</p>
         <p v-if="!stages.length">暂无阶段数据</p>
         <div v-for="[stage, count] in stages" :key="stage" class="statistics-bar">
           <span>{{ stage === '-1' || stage === 'unlearned' || stage === 'new' ? '未学 / 尚未过关' : `阶段 ${stage}` }}</span>
